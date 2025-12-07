@@ -85,7 +85,15 @@ def _ensure_com_available():
 
 def _dispatch(prog_id: str):
     try:
-        return ensure_dispatch(prog_id)
+        obj = ensure_dispatch(prog_id)
+        # Иногда EnsureDispatch возвращает IEventSource без нужных методов
+        # (например, вместо CAdESCOM.Store), тогда пробуем обычный Dispatch.
+        if prog_id == "CAdESCOM.Store" and not hasattr(obj, "Open"):
+            logger.warning(
+                "EnsureDispatch вернул %s без метода Open, пробуем Dispatch", obj
+            )
+            obj = win32com.client.Dispatch(prog_id)
+        return obj
     except Exception as exc:  # pragma: no cover - зависит от окружения Windows
         message = str(exc)
         if "Class not registered" in message:
