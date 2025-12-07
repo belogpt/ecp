@@ -2,4 +2,5 @@ PySide6
 PyMuPDF
 asn1crypto
 cryptography
+pkcs11
 gostcrypto
