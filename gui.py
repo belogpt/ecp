@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QRadioButton,
     QButtonGroup,
+    QComboBox,
 )
 
 from pdf_utils import (
@@ -60,6 +61,12 @@ from pdf_utils import (
 )
 from signature_utils import get_certificate_info, CertificateInfo
 from signing_utils import sign_pdf, sign_pdf_with_pkcs11
+from signer_cadescom import (
+    list_certificates as list_cadescom_certificates,
+    sign_file as sign_file_cadescom,
+    CertificateSummary,
+    SignerCadescomError,
+)
 from browser_signing import BrowserSigningSession, BrowserSigningError
 from cryptopro_cli import (
     CertificateSelectorError,
@@ -454,10 +461,18 @@ class SignDialog(QDialog):
         self.setWindowTitle("Подписать PDF ЭЦП")
         self.pdf_path = pdf_path
         self._result = None
+        self._cades_cert_cache: List[CertificateSummary] = []
 
         tabs = QTabWidget()
-        tabs.addTab(self._build_files_tab(), "Файлы сертификата и ключа")
-        tabs.addTab(self._build_pkcs11_tab(), "Токен PKCS#11")
+        self.cadescom_tab_index = tabs.addTab(
+            self._build_cadescom_tab(), "CryptoPro (CAdESCOM)"
+        )
+        self.files_tab_index = tabs.addTab(
+            self._build_files_tab(), "Файлы сертификата и ключа"
+        )
+        self.pkcs11_tab_index = tabs.addTab(
+            self._build_pkcs11_tab(), "Токен PKCS#11"
+        )
         self.cli_tab_index = tabs.addTab(
             self._build_cryptopro_cli_tab(), "CryptoPro CLI"
         )
@@ -480,6 +495,114 @@ class SignDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(tabs)
         layout.addWidget(buttons)
+
+    # --- вкладка CAdESCOM ---
+    def _build_cadescom_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        layout.addWidget(QLabel(f"Файл: <b>{os.path.basename(self.pdf_path)}</b>"))
+
+        self.cades_cert_list = QListWidget()
+        self.cades_cert_list.setSelectionMode(QListWidget.SingleSelection)
+
+        refresh_btn = QPushButton("Обновить список сертификатов")
+        refresh_btn.clicked.connect(self._reload_cades_certs)
+
+        layout.addWidget(QLabel("Сертификаты в хранилище Windows:"))
+        layout.addWidget(self.cades_cert_list, 1)
+        layout.addWidget(refresh_btn)
+
+        form = QFormLayout()
+        self.cades_detached_checkbox = QCheckBox("Отсоединённая (.p7s)")
+        self.cades_detached_checkbox.setChecked(True)
+        form.addRow("Формат подписи:", self.cades_detached_checkbox)
+
+        self.cades_encoding_combo = QComboBox()
+        self.cades_encoding_combo.addItem("Base64 (.p7s)", "base64")
+        self.cades_encoding_combo.addItem("DER (.p7s)", "der")
+        form.addRow("Кодировка подписи:", self.cades_encoding_combo)
+
+        self.cades_output_edit = QLineEdit()
+        self.cades_output_btn = QPushButton("…")
+        self.cades_output_btn.setFixedWidth(32)
+        self.cades_output_btn.clicked.connect(self._browse_cades_output)
+        output_layout = QHBoxLayout()
+        output_layout.addWidget(self.cades_output_edit, 1)
+        output_layout.addWidget(self.cades_output_btn)
+        form.addRow("Выходной файл (опц.):", output_layout)
+
+        layout.addLayout(form)
+        layout.addStretch(1)
+
+        self._reload_cades_certs(show_errors=False)
+        return widget
+
+    def _reload_cades_certs(self, show_errors: bool = True):
+        self.cades_cert_list.clear()
+        try:
+            certificates = list_cadescom_certificates()
+            self._cades_cert_cache = certificates
+        except SignerCadescomError as exc:
+            logger.exception("CAdESCOM недоступен")
+            if show_errors:
+                QMessageBox.warning(
+                    self,
+                    "CAdESCOM",
+                    str(exc)
+                    + "\n\nЕсли видите 'Class not registered', проверьте совпадение разрядности Python и CSP.",
+                )
+            self.cades_cert_list.setEnabled(False)
+            return
+        except Exception as exc:
+            logger.exception("Не удалось прочитать хранилище сертификатов")
+            if show_errors:
+                QMessageBox.warning(
+                    self,
+                    "Хранилище сертификатов",
+                    f"Не удалось получить список сертификатов:\n{exc}",
+                )
+            self.cades_cert_list.setEnabled(False)
+            return
+
+        self.cades_cert_list.setEnabled(True)
+        for cert in certificates:
+            validity = cert.not_after.strftime("%d.%m.%Y")
+            cn = cert.common_name
+            item = QListWidgetItem(f"{cn} (до {validity})")
+            details = [
+                f"Subject: {cert.subject}",
+                f"Issuer: {cert.issuer}",
+                f"Действителен: {cert.not_before:%d.%m.%Y} — {cert.not_after:%d.%m.%Y}",
+                f"Отпечаток: {cert.thumbprint}",
+            ]
+            if not cert.has_private_key:
+                details.append("Нет доступа к закрытому ключу")
+            if not cert.is_valid:
+                details.append("Сертификат невалиден по сроку действия")
+            item.setToolTip("\n".join(details))
+            item.setData(Qt.UserRole, cert.thumbprint)
+            self.cades_cert_list.addItem(item)
+
+        if certificates and self.cades_cert_list.count() > 0:
+            self.cades_cert_list.setCurrentRow(0)
+
+    def _browse_cades_output(self):
+        start_dir = os.path.dirname(self.pdf_path) if os.path.isfile(self.pdf_path) else ""
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Куда сохранить подпись",
+            start_dir,
+            "Файл подписи (*.p7s);;Все файлы (*.*)",
+        )
+        if path:
+            self.cades_output_edit.setText(path)
+
+    def _get_selected_cades_thumbprint(self) -> Optional[str]:
+        item = self.cades_cert_list.currentItem()
+        if not item:
+            return None
+        return str(item.data(Qt.UserRole) or "")
 
     # --- вкладка файла ---
     def _build_files_tab(self):
@@ -673,7 +796,20 @@ class SignDialog(QDialog):
             self.token_cert_edit.setText(path)
 
     def _validate_and_accept(self):
-        if self.tabs.currentIndex() == 0:
+        current_index = self.tabs.currentIndex()
+        if current_index == self.cadescom_tab_index:
+            thumbprint = self._get_selected_cades_thumbprint()
+            if not thumbprint:
+                QMessageBox.warning(self, "Сертификат", "Выберите сертификат для подписи.")
+                return
+            self._result = {
+                "mode": "cadescom",
+                "thumbprint": thumbprint,
+                "detached": self.cades_detached_checkbox.isChecked(),
+                "encoding": self.cades_encoding_combo.currentData(),
+                "output_path": self.cades_output_edit.text().strip() or None,
+            }
+        elif current_index == self.files_tab_index:
             cert_path = self.cert_edit.text().strip()
             key_path = self.key_edit.text().strip()
             if not cert_path or not os.path.exists(cert_path):
@@ -688,7 +824,7 @@ class SignDialog(QDialog):
                 "key_path": key_path,
                 "password": self.password_edit.text(),
             }
-        elif self.tabs.currentIndex() == self.cli_tab_index:
+        elif current_index == self.cli_tab_index:
             thumbprint = self.cli_thumbprint_edit.text().strip()
             subject = self.cli_subject_edit.text().strip()
             container = self.cli_container_edit.text().strip()
@@ -720,9 +856,9 @@ class SignDialog(QDialog):
                 "output_path": self.cli_output_edit.text().strip() or None,
                 "dry_run": self.cli_dry_run.isChecked(),
             }
-        elif self.tabs.currentIndex() == self.browser_tab_index:
+        elif current_index == self.browser_tab_index:
             self._result = {"mode": "browser"}
-        else:
+        elif current_index == self.pkcs11_tab_index:
             pkcs11_path = self.pkcs11_lib_edit.text().strip()
             pin = self.pin_edit.text()
             slot = self.slot_spin.value()
@@ -744,6 +880,8 @@ class SignDialog(QDialog):
                 "pin": pin,
                 "cert_path": self.token_cert_edit.text().strip() or None,
             }
+        else:
+            self._result = None
         super().accept()
 
     def get_result(self):
@@ -1114,7 +1252,15 @@ class MainWindow(QMainWindow):
         if not result:
             return
         try:
-            if result["mode"] == "files":
+            if result["mode"] == "cadescom":
+                signature_path = sign_file_cadescom(
+                    session.pdf_path,
+                    output_path=result.get("output_path"),
+                    thumbprint=result.get("thumbprint"),
+                    detached=result.get("detached", True),
+                    encoding=result.get("encoding", "base64"),
+                )
+            elif result["mode"] == "files":
                 signature_path = sign_pdf(
                     session.pdf_path,
                     result["cert_path"],
@@ -1154,6 +1300,14 @@ class MainWindow(QMainWindow):
                     key_label=result.get("key_label"),
                     cert_path=result.get("cert_path"),
                 )
+        except SignerCadescomError as e:
+            logger.exception("Ошибка CAdESCOM")
+            hint = (
+                "\n\nЕсли у вас ошибка 'Class not registered', убедитесь, что разрядность"
+                " Python совпадает с установленным CSP."
+            )
+            QMessageBox.critical(self, "Ошибка подписи", f"{e}{hint}")
+            return
         except (CertificateSelectorError, CryptoProNotFoundError, Exception) as e:
             logger.exception("Ошибка создания подписи")
             QMessageBox.critical(
