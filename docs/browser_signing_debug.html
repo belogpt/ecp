@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Отладка плагина CryptoPro в браузере</title>
+  <script id="cadesScript" src="https://www.cryptopro.ru/sites/default/files/products/cades/cadesplugin_api.js" onerror="window._cadesScriptError=true;"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; background: #f2f2f2; }
+    .panel { max-width: 900px; margin: 0 auto; padding: 16px 20px 24px; border: 1px solid #d0d0d0; border-radius: 8px; background: #fff; box-shadow: 0 4px 8px rgba(0,0,0,0.05); }
+    .field { margin: 12px 0; }
+    .log { background: #0c1723; color: #d6e0ea; border: 1px solid #1f2d3a; padding: 12px; border-radius: 6px; height: 220px; overflow: auto; white-space: pre-wrap; font-family: Consolas, monospace; }
+    button { padding: 10px 16px; font-size: 14px; cursor: pointer; }
+    .error { color: #a40000; font-weight: bold; }
+    label { font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <h2>Отладка подписи через браузерный плагин CryptoPro</h2>
+    <p>Эта страница работает автономно и помогает убедиться, что плагин доступен в браузере. Выберите PDF (или используйте встроенный пример), нажмите «Подписать» и следите за логом ниже. Все сообщения остаются внутри страницы и не отправляются на сервер.</p>
+
+    <div class="field">
+      <label for="fileInput">PDF для тестовой подписи:</label><br />
+      <input id="fileInput" type="file" accept="application/pdf" />
+      <button id="useSample" type="button">Использовать встроенный пример</button>
+    </div>
+
+    <div class="field">
+      <button id="signBtn" type="button">Подписать выбранный файл</button>
+      <span id="fileStatus"></span>
+    </div>
+
+    <div class="field">
+      <div id="log" class="log"></div>
+      <div id="error" class="error"></div>
+    </div>
+  </div>
+
+  <script>
+    const SAMPLE_TEXT = "Демонстрационный документ для проверки плагина CryptoPro.";
+    let pdfBase64 = null;
+
+    function log(msg) {
+      console.log('[CryptoProDebug]', msg);
+      const box = document.getElementById('log');
+      box.textContent += msg + '\n';
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function showError(msg) {
+      document.getElementById('error').textContent = msg;
+      log('Ошибка: ' + msg);
+    }
+
+    function clearError() {
+      document.getElementById('error').textContent = '';
+    }
+
+    function setBusy(state) {
+      const btn = document.getElementById('signBtn');
+      btn.disabled = state;
+      btn.textContent = state ? 'Подписание…' : 'Подписать выбранный файл';
+    }
+
+    function updateFileStatus(name) {
+      const el = document.getElementById('fileStatus');
+      el.textContent = name ? `Файл: ${name}` : '';
+    }
+
+    function toBase64(arrayBuffer) {
+      const bytes = new Uint8Array(arrayBuffer);
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      return btoa(binary);
+    }
+
+    function readFileAsBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(toBase64(reader.result));
+        reader.onerror = () => reject(reader.error || new Error('Не удалось прочитать файл'));
+        reader.readAsArrayBuffer(file);
+      });
+    }
+
+    async function pickSamplePdf() {
+      log('Используем встроенный тестовый документ.');
+      const encoder = new TextEncoder();
+      const bytes = encoder.encode(SAMPLE_TEXT);
+      pdfBase64 = btoa(String.fromCharCode(...bytes));
+      updateFileStatus('Встроенный пример (текст)');
+    }
+
+    async function handleFileSelect(file) {
+      if (!file) return;
+      log(`Читаем файл ${file.name}...`);
+      pdfBase64 = await readFileAsBase64(file);
+      updateFileStatus(file.name);
+    }
+
+    function waitForPluginLoad(timeoutMs = 12000) {
+      if (window.cadesplugin) return Promise.resolve(window.cadesplugin);
+      if (window._cadesScriptError) return Promise.reject(new Error('Не удалось загрузить cadesplugin_api.js'));
+
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Плагин CryptoPro не загрузился (таймаут)')), timeoutMs);
+        const script = document.getElementById('cadesScript');
+        if (!script) {
+          clearTimeout(timer);
+          reject(new Error('Скрипт плагина не найден на странице'));
+          return;
+        }
+        script.addEventListener('error', () => {
+          clearTimeout(timer);
+          reject(new Error('Не удалось загрузить cadesplugin_api.js'));
+        });
+        script.addEventListener('load', () => {
+          clearTimeout(timer);
+          resolve(window.cadesplugin);
+        });
+      });
+    }
+
+    async function sign() {
+      clearError();
+      if (!pdfBase64) {
+        await pickSamplePdf();
+      }
+
+      log('Проверяем наличие плагина CryptoPro...');
+      setBusy(true);
+      try {
+        const plugin = await waitForPluginLoad();
+        if (!plugin) {
+          showError('Плагин CryptoPro не найден в браузере.');
+          return;
+        }
+
+        log('Открываем хранилище сертификатов...');
+        const store = await plugin.CreateObjectAsync('CAdESCOM.Store');
+        await store.Open();
+        const certs = await store.Certificates;
+        const selected = await certs.Select();
+        const count = await selected.Count;
+        if (!count) {
+          showError('Выбор сертификата отменён.');
+          return;
+        }
+
+        const cert = await selected.Item(1);
+        const signer = await plugin.CreateObjectAsync('CAdESCOM.CPSigner');
+        await signer.propset_Certificate(cert);
+        log('Сертификат выбран, формируем подпись...');
+
+        const sd = await plugin.CreateObjectAsync('CAdESCOM.CadesSignedData');
+        await sd.propset_ContentEncoding(plugin.CADESCOM_BASE64_TO_BINARY);
+        await sd.propset_Content(pdfBase64);
+        const signature = await sd.SignCades(signer, plugin.CADESCOM_CADES_BES, true);
+        log('Подпись сформирована. Длина: ' + signature.length + ' символов base64.');
+        log('Готово. Можно закрывать страницу или выбрать другой файл.');
+      } catch (e) {
+        console.error(e);
+        const msg = (e && e.message) ? e.message : String(e);
+        showError(msg);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    document.getElementById('fileInput').addEventListener('change', async (ev) => {
+      const file = ev.target.files?.[0];
+      try {
+        await handleFileSelect(file);
+      } catch (e) {
+        showError((e && e.message) ? e.message : String(e));
+      }
+    });
+
+    document.getElementById('useSample').addEventListener('click', () => {
+      pickSamplePdf();
+    });
+
+    document.getElementById('signBtn').addEventListener('click', () => {
+      log('Запущен процесс подписи.');
+      sign();
+    });
+
+    window.addEventListener('DOMContentLoaded', () => {
+      log('Страница загружена. Можно выбрать файл PDF или нажать "Использовать встроенный пример".');
+    });
+  </script>
+</body>
+</html>
