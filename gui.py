@@ -992,7 +992,12 @@ class MainWindow(QMainWindow):
                     "Подпись через браузер отменена пользователем или прервана"
                 )
 
-            result = browser_session.wait(timeout=0.1)
+            # Даем браузерному плагину достаточно времени для выбора сертификата
+            # и создания подписи (по умолчанию 180 секунд в BrowserSigningSession).
+            # Короткий таймаут приводил к преждевременному завершению сессии и
+            # остановке встроенного HTTP-сервера, из-за чего на странице плагина
+            # не появлялись логи и подпись не успевала формироваться.
+            result = browser_session.wait()
 
         base_name, _ = os.path.splitext(os.path.basename(pdf_path))
         signature_name = f"{base_name}_Файл подписи.p7s"
