@@ -1,0 +1,5 @@
+PySide6
+PyMuPDF
+asn1crypto
+cryptography
+gostcrypto
