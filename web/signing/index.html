@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Подпись PDF через CryptoPro</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7fb;
+      --text: #121826;
+      --panel: #ffffff;
+      --border: #d7deea;
+      --accent: #0a69c5;
+      --error: #c62828;
+      --warn: #b45309;
+      --ok: #1b873f;
+      --muted: #5f6b7a;
+      --log-bg: #0f172a;
+      --log-text: #e2e8f0;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b1020;
+        --text: #e2e8f0;
+        --panel: #11182b;
+        --border: #25324b;
+        --accent: #7cb6ff;
+        --muted: #94a3b8;
+        --log-bg: #0b1220;
+        --log-text: #cbd5e1;
+      }
+    }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+      line-height: 1.6;
+    }
+
+    h1 {
+      margin: 0 0 6px 0;
+      font-size: 22px;
+    }
+
+    h3 {
+      margin: 12px 0 8px 0;
+    }
+
+    .panel {
+      max-width: 900px;
+      margin: 0 auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px 22px 24px;
+      box-shadow: 0 10px 30px rgba(12, 22, 44, 0.12);
+    }
+
+    .subtitle {
+      margin-top: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin: 14px 0;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      font-weight: 600;
+      border: 1px solid var(--border);
+      background: rgba(10, 105, 197, 0.06);
+    }
+
+    .badge.ok { color: var(--ok); border-color: #b7dfc1; background: rgba(27, 135, 63, 0.08); }
+    .badge.warn { color: var(--warn); border-color: #f1c58b; background: rgba(180, 83, 9, 0.08); }
+    .badge.error { color: var(--error); border-color: #f2b8b5; background: rgba(198, 40, 40, 0.08); }
+    .badge.muted { color: var(--muted); background: rgba(95, 107, 122, 0.08); }
+
+    button {
+      padding: 11px 16px;
+      font-size: 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+      transition: transform 0.05s ease, box-shadow 0.1s ease;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+      transform: none;
+      box-shadow: none;
+    }
+
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 18px rgba(10, 105, 197, 0.28);
+    }
+
+    .secondary-btn {
+      background: transparent;
+      color: var(--text);
+    }
+
+    .log {
+      background: var(--log-bg);
+      color: var(--log-text);
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-family: "JetBrains Mono", Consolas, monospace;
+      white-space: pre-wrap;
+      min-height: 120px;
+      border: 1px solid var(--border);
+      margin-top: 14px;
+      overflow-y: auto;
+    }
+
+    .log.small {
+      min-height: 60px;
+      max-height: 160px;
+    }
+
+    .error-box {
+      color: var(--error);
+      margin-top: 10px;
+      font-weight: 600;
+      min-height: 20px;
+    }
+
+    .muted { color: var(--muted); }
+
+    .tip {
+      background: rgba(10, 105, 197, 0.06);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-top: 14px;
+      color: var(--text);
+    }
+
+    .guard {
+      max-width: 760px;
+      margin: 80px auto;
+      padding: 22px 24px;
+      border: 2px dashed var(--warn);
+      border-radius: 14px;
+      background: rgba(180, 83, 9, 0.06);
+    }
+  </style>
+  <script>
+    if (location.protocol === 'file:') {
+      document.write(`
+        <div class="guard">
+          <h2>Эта страница не должна открываться как file://</h2>
+          <p>Откройте её через локальный сервер из приложения. Так браузер разрешит плагину CryptoPro работать с текущим origin.</p>
+          <ol>
+            <li>Запустите приложение и нажмите «Подписать через браузер».</li>
+            <li>Приложение поднимет локальный сервер и откроет страницу по адресу <b>http://127.0.0.1:&lt;порт&gt;/</b>.</li>
+            <li>Если запускаете вручную, настройте расширение CryptoPro: включите «Разрешить доступ к URL файлов» только как запасной вариант.</li>
+          </ol>
+          <p class="muted">Инициализация подписи остановлена, чтобы избежать ошибок плагина.</p>
+        </div>
+      `);
+      window.__stopSigningInit = true;
+    }
+  </script>
+</head>
+<body>
+  <main id="app">
+    <div class="panel">
+      <h1>Подпись PDF через CryptoPro</h1>
+      <p class="subtitle">Страница запускается локальным сервером приложения, чтобы плагин видел текущий origin.</p>
+
+      <div class="status-row">
+        <div>
+          <h3>Статус ЭЦП</h3>
+          <div id="cadesStatus" class="badge muted">Ещё не проверено</div>
+        </div>
+        <button id="checkCadesBtn" class="secondary-btn" type="button">Проверить ЭЦП</button>
+      </div>
+
+      <p id="fileInfo" class="muted"></p>
+      <button id="startBtn" type="button">Выбрать сертификат и подписать</button>
+
+      <div class="tip">
+        <b>Как это работает</b>: страница получает PDF из приложения, вызывает плагин CryptoPro, а готовую подпись возвращает через локальный HTTP endpoint.
+      </div>
+
+      <div id="status" class="log"></div>
+      <div id="pythonLog" class="log small" aria-live="polite"></div>
+      <div id="error" class="error-box" role="alert"></div>
+    </div>
+  </main>
+  <script src="signing.js"></script>
+</body>
+</html>
