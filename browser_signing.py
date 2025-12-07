@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import mimetypes
 import os
 import secrets
 import socket
@@ -11,8 +12,17 @@ import threading
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+
+from paths import get_resource_path
+
+PLUGIN_SCRIPT_SOURCES = [
+    "https://www.cryptopro.ru/sites/default/files/products/cades/cadesplugin_api.js",
+    "chrome-extension://iifchhfnnmpdbibifmljnfjhpififfog/nmcades_plugin_api.js",
+    "chrome-extension://epiejncknlhcgcanmnmnjnmghjkpgkdd/nmcades_plugin_api.js",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -78,25 +88,20 @@ class _BrowserSigningHandler(BaseHTTPRequestHandler):
         if parsed.path == "/logs":
             self._handle_logs(parsed)
             return
-        if parsed.path != "/":
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        params = parse_qs(parsed.query)
-        nonce = (params.get("nonce") or [None])[0]
-        if nonce != self.session.nonce:
-            logger.warning(
-                "GET с неверным nonce от %s: %s", self.client_address[0], nonce
-            )
-            self._reject(HTTPStatus.FORBIDDEN, "Invalid nonce")
+        if parsed.path == "/config":
+            self._handle_config(parsed)
             return
 
-        body = self.session.render_page()
-        data = body.encode("utf-8")
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        if parsed.path in {"/", "/index.html"}:
+            if not self._validate_nonce(parsed):
+                return
+            self._serve_static_file("index.html")
+            return
+
+        if self._serve_static_file(parsed.path.lstrip("/")):
+            return
+
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def _handle_logs(self, parsed):
         params = parse_qs(parsed.query)
@@ -121,6 +126,67 @@ class _BrowserSigningHandler(BaseHTTPRequestHandler):
 
         last_id, items = self.session.get_logs_since(after)
         payload = json.dumps({"last": last_id, "items": items}, ensure_ascii=False)
+        data = payload.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _validate_nonce(self, parsed) -> bool:
+        params = parse_qs(parsed.query)
+        nonce = (params.get("nonce") or [None])[0]
+        if nonce != self.session.nonce:
+            logger.warning(
+                "Запрос с неверным nonce от %s: %s", self.client_address[0], nonce
+            )
+            self._reject(HTTPStatus.FORBIDDEN, "Invalid nonce")
+            return False
+        return True
+
+    def _serve_static_file(self, relative_path: str) -> bool:
+        clean_path = os.path.normpath(unquote(relative_path)).lstrip(os.sep)
+        if not clean_path:
+            clean_path = "index.html"
+        full_path = (self.session.static_root / clean_path).resolve()
+        try:
+            full_path.relative_to(self.session.static_root)
+        except ValueError:
+            self._reject(HTTPStatus.FORBIDDEN, "Path is outside static root")
+            return True
+
+        if not full_path.exists() or not full_path.is_file():
+            return False
+
+        content_type, _ = mimetypes.guess_type(full_path.name)
+        content_type = content_type or "application/octet-stream"
+        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
+            content_type = f"{content_type}; charset=utf-8"
+        data = full_path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+        return True
+
+    def _handle_config(self, parsed):
+        if not self._validate_nonce(parsed):
+            return
+
+        initial_last_id, initial_logs = self.session.get_logs_since(0)
+        payload = json.dumps(
+            {
+                "nonce": self.session.nonce,
+                "pdfName": os.path.basename(self.session.pdf_path),
+                "pdfBase64": self.session.pdf_b64,
+                "logEnabled": self.session.log_to_page,
+                "initialLogs": initial_logs,
+                "lastLogId": initial_last_id,
+                "pluginScriptSources": self.session.plugin_script_sources,
+            },
+            ensure_ascii=False,
+        )
         data = payload.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -207,6 +273,12 @@ class BrowserSigningSession:
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
         self._pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+        self.static_root = Path(get_resource_path("web/signing")).resolve()
+        if not self.static_root.exists():
+            raise FileNotFoundError(
+                f"Каталог статических файлов для браузерной подписи не найден: {self.static_root}"
+            )
+        self.plugin_script_sources = list(PLUGIN_SCRIPT_SOURCES)
         self._port = None
 
     def start(self):
@@ -247,6 +319,10 @@ class BrowserSigningSession:
             raise BrowserSigningError("Сервер ещё не запущен")
         return f"http://127.0.0.1:{self._port}/?nonce={self.nonce}"
 
+    @property
+    def pdf_b64(self) -> str:
+        return self._pdf_b64
+
     def wait(self, timeout: float = 180.0) -> BrowserSigningResult:
         finished = self._event.wait(timeout=timeout)
         if not finished:
@@ -272,244 +348,6 @@ class BrowserSigningSession:
         logger.info("Успешная подпись через браузер получена: %s", result.message)
         self._result = result
         self._event.set()
-
-    def render_page(self) -> str:
-        initial_logs = []
-        if self.log_to_page:
-            last_id, initial_logs = self.get_logs_since(0)
-        else:
-            last_id = 0
-        return f"""
-<!doctype html>
-<html lang=\"ru\">
-<head>
-  <meta charset=\"UTF-8\" />
-  <title>Подпись PDF через CryptoPro</title>
-  <script>
-    const pluginScriptSources = [
-      // Основной источник CryptoPro
-      'https://www.cryptopro.ru/sites/default/files/products/cades/cadesplugin_api.js',
-      // Расширение для Chromium/Chrome/Edge
-      'chrome-extension://iifchhfnnmpdbibifmljnfjhpififfog/nmcades_plugin_api.js',
-      // Резервный идентификатор расширения (иногда меняется после переподписания)
-      'chrome-extension://epiejncknlhcgcanmnmnjnmghjkpgkdd/nmcades_plugin_api.js',
-    ];
-
-    function appendScript(url, timeoutMs = 8000) {{
-      return new Promise((resolve, reject) => {{
-        const script = document.createElement('script');
-        script.src = url;
-        script.async = true;
-
-        const timer = setTimeout(() => {{
-          cleanup();
-          reject(new Error('таймаут загрузки скрипта'));
-        }}, timeoutMs);
-
-        function cleanup() {{
-          clearTimeout(timer);
-          script.onerror = null;
-          script.onload = null;
-        }}
-
-        script.onerror = () => {{
-          cleanup();
-          reject(new Error('ошибка загрузки скрипта'));
-        }};
-        script.onload = () => {{
-          cleanup();
-          resolve();
-        }};
-
-        document.head.appendChild(script);
-      }});
-    }}
-
-    async function ensureCadespluginReady() {{
-      const plugin = window.cadesplugin;
-      if (!plugin) return null;
-      if (typeof plugin.then === 'function') {{
-        await plugin;
-      }}
-      return window.cadesplugin;
-    }}
-
-    async function loadCadesPlugin() {{
-      if (window.cadesplugin) {{
-        return ensureCadespluginReady();
-      }}
-
-      let lastError = null;
-      for (const src of pluginScriptSources) {{
-        try {{
-          log('Пробуем загрузить cadesplugin_api.js: ' + src);
-          await appendScript(src);
-          const plugin = await ensureCadespluginReady();
-          if (plugin) return plugin;
-          lastError = new Error('cadesplugin_api.js загружен, но объект плагина не появился');
-        }} catch (e) {{
-          lastError = e;
-          log('Не удалось загрузить cadesplugin_api.js из ' + src + ': ' + e.message);
-        }}
-      }}
-
-      throw lastError || new Error('Плагин CryptoPro не найден');
-    }}
-  </script>
-  <style>
-    body {{ font-family: Arial, sans-serif; margin: 24px; }}
-    .panel {{ max-width: 760px; margin: 0 auto; padding: 16px; border: 1px solid #d0d0d0; border-radius: 8px; }}
-    .log {{ background: #f7f7f7; border: 1px solid #d0d0d0; padding: 12px; border-radius: 6px; height: 200px; overflow: auto; white-space: pre-wrap; }}
-    button {{ padding: 10px 16px; font-size: 14px; }}
-    .error {{ color: #a40000; }}
-  </style>
-</head>
-<body>
-  <div class=\"panel\">
-    <h2>Подпись PDF через браузерный плагин CryptoPro</h2>
-    <p>Файл: <b>{os.path.basename(self.pdf_path)}</b></p>
-    <p>Плагин запросит выбор сертификата и ввод PIN/пароля при необходимости. После успешной подписи окно можно закрыть.</p>
-    <button id=\"startBtn\" type=\"button\">Выбрать сертификат и подписать</button>
-    <div id=\"status\" class=\"log\"></div>
-    <div id=\"error\" class=\"error\"></div>
-  </div>
-  <script>
-    const nonce = {json.dumps(self.nonce)};
-    const postUrl = '/result';
-    const pdfBase64 = {json.dumps(self._pdf_b64)};
-    const logEnabled = {json.dumps(self.log_to_page)};
-    let lastLogId = {json.dumps(last_id)};
-
-    const startBtn = document.getElementById('startBtn');
-
-    function log(msg) {{
-      console.log('[CryptoProPage]', msg);
-      const box = document.getElementById('status');
-      box.textContent += msg + '\n';
-      box.scrollTop = box.scrollHeight;
-    }}
-    function showError(msg) {{
-      document.getElementById('error').textContent = msg;
-      log('Ошибка: ' + msg);
-    }}
-
-    function applyPythonLogs(items) {{
-      if (!items || !items.length) return;
-      items.forEach((item) => log('[Python] ' + item));
-    }}
-
-    async function pollPythonLogs() {{
-      if (!logEnabled) return;
-      try {{
-        const resp = await fetch(`/logs?nonce=${{encodeURIComponent(nonce)}}&after=${{lastLogId}}`);
-        if (!resp.ok) throw new Error(`HTTP ${{resp.status}}`);
-        const data = await resp.json();
-        applyPythonLogs(data.items || []);
-        if (typeof data.last === 'number') {{
-          lastLogId = data.last;
-        }}
-      }} catch (e) {{
-        console.warn('Не удалось получить логи сервера:', e);
-      }} finally {{
-        if (logEnabled) setTimeout(pollPythonLogs, 1500);
-      }}
-    }}
-
-    function setBusy(state) {{
-      if (!startBtn) return;
-      startBtn.disabled = state;
-      startBtn.textContent = state ? 'Подписание…' : 'Выбрать сертификат и подписать';
-    }}
-
-    async function sendResult(payload) {{
-      try {{
-        await fetch(postUrl, {{
-          method: 'POST',
-          headers: {{ 'Content-Type': 'application/json' }},
-          body: JSON.stringify(payload),
-        }});
-        log('Результат отправлен приложению.');
-      }} catch (e) {{
-        showError('Не удалось отправить результат: ' + e);
-      }}
-    }}
-
-    async function waitForPluginLoad(timeoutMs = 12000) {{
-      let timer = null;
-      const timeoutPromise = new Promise((_, reject) => {{
-        timer = setTimeout(() => reject(new Error('Плагин CryptoPro не загрузился (таймаут)')), timeoutMs);
-      }});
-
-      try {{
-        const plugin = await Promise.race([loadCadesPlugin(), timeoutPromise]);
-        if (!plugin) {{
-          throw new Error('Плагин CryptoPro не найден');
-        }}
-        return plugin;
-      }} finally {{
-        if (timer) clearTimeout(timer);
-      }}
-    }}
-
-    async function sign() {{
-      document.getElementById('error').textContent = '';
-      log('Проверяем наличие плагина CryptoPro...');
-      setBusy(true);
-      try {{
-        const plugin = await waitForPluginLoad();
-        if (!plugin) {{
-          showError('Плагин CryptoPro не найден в браузере.');
-          await sendResult({{nonce, status: 'error', error: 'Плагин CryptoPro не найден'}});
-          return;
-        }}
-        log('Открываем хранилище сертификатов...');
-        const store = await plugin.CreateObjectAsync('CAdESCOM.Store');
-        await store.Open();
-        const certs = await store.Certificates;
-        const selected = await certs.Select();
-        const count = await selected.Count;
-        if (!count) {{
-          showError('Выбор сертификата отменён.');
-          await sendResult({{nonce, status: 'error', error: 'Выбор сертификата отменён'}});
-          return;
-        }}
-        const cert = await selected.Item(1);
-        const signer = await plugin.CreateObjectAsync('CAdESCOM.CPSigner');
-        await signer.propset_Certificate(cert);
-        log('Сертификат выбран, формируем подпись...');
-        const sd = await plugin.CreateObjectAsync('CAdESCOM.CadesSignedData');
-        await sd.propset_ContentEncoding(plugin.CADESCOM_BASE64_TO_BINARY);
-        await sd.propset_Content(pdfBase64);
-        const signature = await sd.SignCades(signer, plugin.CADESCOM_CADES_BES, true);
-        log('Подпись сформирована, отправляем обратно в приложение...');
-        await sendResult({{nonce, status: 'ok', signature}});
-        log('Готово. Теперь можно вернуться в приложение.');
-      }} catch (e) {{
-        console.error(e);
-        const msg = (e && e.message) ? e.message : String(e);
-        showError(msg);
-        await sendResult({{nonce, status: 'error', error: msg}});
-      }} finally {{
-        setBusy(false);
-      }}
-    }}
-
-    document.getElementById('startBtn').addEventListener('click', () => {{
-      log('Запущен процесс подписи по кнопке.');
-      sign();
-    }});
-
-    // Автостарт на случай если пользователь ожидает мгновенную реакцию
-    window.addEventListener('DOMContentLoaded', () => {{
-      log('Страница готова. Пробуем автоматически запустить подписание...');
-      applyPythonLogs({json.dumps(initial_logs)});
-      if (logEnabled) pollPythonLogs();
-      sign();
-    }});
-  </script>
-</body>
-</html>
-"""
 
     def _append_log(self, message: str):
         with self._log_lock:
