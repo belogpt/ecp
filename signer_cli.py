@@ -26,6 +26,11 @@ def _add_certificate_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--thumbprint", help="Отпечаток сертификата")
     parser.add_argument("--subject", help="Часть subject сертификата (запасной вариант)")
     parser.add_argument("--container", help="Имя контейнера (fallback)")
+    parser.add_argument(
+        "--choose",
+        action="store_true",
+        help="Открыть встроенный выбор сертификатов и подписать выбранным сертификатом",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -68,6 +73,7 @@ def _handle_sign(args: argparse.Namespace) -> int:
                 thumbprint=args.thumbprint,
                 subject=args.subject,
                 container=args.container,
+                choose=args.choose,
                 dry_run=args.dry_run,
             )
         else:
@@ -77,6 +83,7 @@ def _handle_sign(args: argparse.Namespace) -> int:
                 thumbprint=args.thumbprint,
                 subject=args.subject,
                 container=args.container,
+                choose=args.choose,
                 dry_run=args.dry_run,
             )
     except (CertificateSelectorError, FileNotFoundError, CryptoProNotFoundError, RuntimeError) as exc:
