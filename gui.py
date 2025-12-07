@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional, List, Dict
 
 import fitz  # PyMuPDF
-from PySide6.QtCore import Qt, QRectF, QSize, QPoint, QUrl, QTimer, QDesktopServices
+from PySide6.QtCore import Qt, QRectF, QSize, QPoint, QUrl, QTimer
 from PySide6.QtGui import (
     QPixmap,
     QImage,
@@ -15,6 +15,7 @@ from PySide6.QtGui import (
     QMouseEvent,
     QIcon,
     QAction,
+    QDesktopServices,
 )
 from PySide6.QtWidgets import (
     QApplication,
