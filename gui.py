@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional, List, Dict
 
 import fitz  # PyMuPDF
-from PySide6.QtCore import Qt, QRectF, QSize, QPoint, QUrl
+from PySide6.QtCore import Qt, QRectF, QSize, QPoint, QUrl, QTimer, QDesktopServices
 from PySide6.QtGui import (
     QPixmap,
     QImage,
@@ -57,6 +57,7 @@ from pdf_utils import (
 )
 from signature_utils import get_certificate_info, CertificateInfo
 from signing_utils import sign_pdf, sign_pdf_with_pkcs11
+from browser_signing import BrowserSigningSession, BrowserSigningError
 from paths import get_resource_path
 
 logger = logging.getLogger(__name__)
@@ -448,6 +449,9 @@ class SignDialog(QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._build_files_tab(), "Файлы сертификата и ключа")
         tabs.addTab(self._build_pkcs11_tab(), "Токен PKCS#11")
+        self.browser_tab_index = tabs.addTab(
+            self._build_browser_tab(), "Через браузер (CryptoPro)"
+        )
         self.tabs = tabs
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -496,6 +500,26 @@ class SignDialog(QDialog):
         form.addRow("Пароль к ключу (если есть):", self.password_edit)
 
         form.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        return widget
+
+    # --- вкладка браузера ---
+    def _build_browser_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.addWidget(QLabel(f"Файл: <b>{os.path.basename(self.pdf_path)}</b>"))
+        layout.addWidget(
+            QLabel(
+                "Откроется страница в браузере с плагином CryptoPro. "
+                "Выберите сертификат, введите PIN/пароль по запросу и подтвердите подпись."
+            )
+        )
+        layout.addWidget(
+            QLabel(
+                "Если плагин отсутствует или браузер не поддерживается, вернитесь в диалог и "
+                "выберите другой способ подписи."
+            )
+        )
+        layout.addStretch(1)
         return widget
 
     # --- вкладка токена ---
@@ -600,6 +624,8 @@ class SignDialog(QDialog):
                 "key_path": key_path,
                 "password": self.password_edit.text(),
             }
+        elif self.tabs.currentIndex() == self.browser_tab_index:
+            self._result = {"mode": "browser"}
         else:
             pkcs11_path = self.pkcs11_lib_edit.text().strip()
             pin = self.pin_edit.text()
@@ -923,6 +949,61 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             self.update_stamp_preview()
 
+    def _create_browser_wait_dialog(self, browser_session: BrowserSigningSession, url: str) -> QDialog:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Подпись через браузер (CryptoPro)")
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(
+            QLabel(
+                "В браузере открылось окно подписи через плагин CryptoPro. "
+                "После выбора сертификата и ввода PIN вернитесь в приложение."
+            )
+        )
+        link = QLabel(f"<a href=\"{url}\">Открыть страницу подписи ещё раз</a>")
+        link.setOpenExternalLinks(True)
+        layout.addWidget(link)
+        status_label = QLabel("Ожидание ответа от браузера…")
+        layout.addWidget(status_label)
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        timer = QTimer(dlg)
+
+        def tick():
+            if browser_session.is_finished():
+                status_label.setText("Ответ получен, завершаем…")
+                dlg.accept()
+
+        timer.timeout.connect(tick)
+        timer.start(300)
+        dlg.finished.connect(timer.stop)
+        return dlg
+
+    def _sign_pdf_via_browser(self, pdf_path: str) -> str:
+        with BrowserSigningSession(pdf_path) as browser_session:
+            browser_session.start()
+            url = browser_session.url()
+            QDesktopServices.openUrl(QUrl(url))
+            wait_dialog = self._create_browser_wait_dialog(browser_session, url)
+            if wait_dialog.exec() != QDialog.Accepted:
+                raise BrowserSigningError(
+                    "Подпись через браузер отменена пользователем или прервана"
+                )
+
+            result = browser_session.wait(timeout=0.1)
+
+        base_name, _ = os.path.splitext(os.path.basename(pdf_path))
+        signature_name = f"{base_name}_Файл подписи.p7s"
+        target_dir = os.path.dirname(pdf_path) or os.getcwd()
+        os.makedirs(target_dir, exist_ok=True)
+        signature_path = os.path.join(target_dir, signature_name)
+        with open(signature_path, "wb") as f:
+            f.write(result.signature)
+
+        logger.info("Файл подписи создан через браузерный плагин: %s", signature_path)
+        return signature_path
+
     def on_sign_pdf_clicked(self):
         if self.current_session_index < 0 or not self.doc:
             QMessageBox.warning(self, "Нет файла", "Сначала выберите PDF для подписи.")
@@ -944,6 +1025,8 @@ class MainWindow(QMainWindow):
                     result["key_path"],
                     result["password"],
                 )
+            elif result["mode"] == "browser":
+                signature_path = self._sign_pdf_via_browser(session.pdf_path)
             else:
                 signature_path = sign_pdf_with_pkcs11(
                     session.pdf_path,
