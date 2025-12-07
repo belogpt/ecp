@@ -35,6 +35,12 @@ class _BrowserSigningHandler(BaseHTTPRequestHandler):
         logger.debug("BrowserSigningServer: " + fmt, *args)
 
     def _reject(self, status=HTTPStatus.FORBIDDEN, message: str = "Forbidden"):
+        logger.warning(
+            "Отклонён запрос от %s: %s (%s)",
+            self.client_address[0],
+            message,
+            status,
+        )
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
@@ -52,12 +58,16 @@ class _BrowserSigningHandler(BaseHTTPRequestHandler):
             return
 
         parsed = urlparse(self.path)
+        logger.debug("GET %s от %s", parsed.path, self.client_address[0])
         if parsed.path != "/":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         params = parse_qs(parsed.query)
         nonce = (params.get("nonce") or [None])[0]
         if nonce != self.session.nonce:
+            logger.warning(
+                "GET с неверным nonce от %s: %s", self.client_address[0], nonce
+            )
             self._reject(HTTPStatus.FORBIDDEN, "Invalid nonce")
             return
 
@@ -74,6 +84,7 @@ class _BrowserSigningHandler(BaseHTTPRequestHandler):
             return
 
         parsed = urlparse(self.path)
+        logger.debug("POST %s от %s", parsed.path, self.client_address[0])
         if parsed.path != "/result":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -82,27 +93,38 @@ class _BrowserSigningHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw.decode("utf-8"))
         except Exception:
+            logger.exception("Не удалось разобрать JSON из браузера")
             self._reject(HTTPStatus.BAD_REQUEST, "Invalid JSON")
             return
 
         if payload.get("nonce") != self.session.nonce:
+            logger.warning(
+                "POST с неверным nonce от %s: %s", self.client_address[0], payload
+            )
             self._reject(HTTPStatus.FORBIDDEN, "Invalid nonce")
             return
 
         status = payload.get("status")
         if status != "ok":
             error_message = payload.get("error") or "Неизвестная ошибка браузерной подписи"
+            logger.error(
+                "Браузер сообщил об ошибке: %s (payload: %s)",
+                error_message,
+                {k: v for k, v in payload.items() if k != "signature"},
+            )
             self.session.set_error(error_message)
             self._respond_ok()
             return
 
         signature_b64 = payload.get("signature")
         if not signature_b64:
+            logger.error("Ответ из браузера без подписи: %s", payload)
             self._reject(HTTPStatus.BAD_REQUEST, "No signature")
             return
         try:
             signature = base64.b64decode(signature_b64)
         except Exception:
+            logger.exception("Не удалось декодировать подпись из base64")
             self._reject(HTTPStatus.BAD_REQUEST, "Bad signature encoding")
             return
 
@@ -149,6 +171,7 @@ class BrowserSigningSession:
         if self._server:
             self._server.shutdown()
             self._server.server_close()
+            logger.info("Браузерный сервер подписи остановлен")
             self._server = None
         if self._thread:
             self._thread.join(timeout=2.0)
@@ -162,6 +185,9 @@ class BrowserSigningSession:
     def wait(self, timeout: float = 180.0) -> BrowserSigningResult:
         finished = self._event.wait(timeout=timeout)
         if not finished:
+            logger.error(
+                "Ожидание ответа из браузера истекло через %s секунд", timeout
+            )
             raise BrowserSigningError("Не получили ответ из браузера за отведённое время")
         if self._error:
             raise BrowserSigningError(self._error)
@@ -178,6 +204,7 @@ class BrowserSigningSession:
         self._event.set()
 
     def set_result(self, result: BrowserSigningResult):
+        logger.info("Успешная подпись через браузер получена: %s", result.message)
         self._result = result
         self._event.set()
 
