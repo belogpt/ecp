@@ -188,6 +188,7 @@ class BrowserSigningSession:
 <head>
   <meta charset=\"UTF-8\" />
   <title>Подпись PDF через CryptoPro</title>
+  <script src=\"https://www.cryptopro.ru/sites/default/files/products/cades/cadesplugin_api.js\"></script>
   <style>
     body {{ font-family: Arial, sans-serif; margin: 24px; }}
     .panel {{ max-width: 760px; margin: 0 auto; padding: 16px; border: 1px solid #d0d0d0; border-radius: 8px; }}
@@ -236,12 +237,13 @@ class BrowserSigningSession:
     async function sign() {{
       document.getElementById('error').textContent = '';
       log('Проверяем наличие плагина CryptoPro...');
-      if (!window.cadesplugin) {{
-        showError('Плагин CryptoPro не найден в браузере.');
-        await sendResult({{nonce, status: 'error', error: 'Плагин CryptoPro не найден'}});
-        return;
-      }}
       try {{
+        if (!window.cadesplugin) {{
+          showError('Плагин CryptoPro не найден в браузере.');
+          await sendResult({{nonce, status: 'error', error: 'Плагин CryptoPro не найден'}});
+          return;
+        }}
+
         await window.cadesplugin;
         const plugin = window.cadesplugin;
         log('Открываем хранилище сертификатов...');
