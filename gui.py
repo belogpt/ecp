@@ -529,6 +529,10 @@ class SignDialog(QDialog):
         self.cli_container_edit = QLineEdit()
         form.addRow("Контейнер (резервно):", self.cli_container_edit)
 
+        self.cli_choose_checkbox = QCheckBox("Выбрать сертификат из хранилища через cryptcp")
+        self.cli_choose_checkbox.toggled.connect(self._update_cli_fields_state)
+        form.addRow("", self.cli_choose_checkbox)
+
         self.cli_detached_radio = QRadioButton("Отсоединённая (.sig)")
         self.cli_attached_radio = QRadioButton("Присоединённая (.p7m)")
         self.cli_detached_radio.setChecked(True)
@@ -553,6 +557,7 @@ class SignDialog(QDialog):
         form.addRow("", hint)
 
         form.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        self._update_cli_fields_state(self.cli_choose_checkbox.isChecked())
         return widget
 
     # --- вкладка браузера ---
@@ -618,6 +623,12 @@ class SignDialog(QDialog):
         form.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
         return widget
 
+    def _update_cli_fields_state(self, checked: bool):
+        for field in (self.cli_thumbprint_edit, self.cli_subject_edit, self.cli_container_edit):
+            field.setDisabled(checked)
+            if checked:
+                field.clear()
+
     def _browse_cert(self):
         start_dir = os.path.dirname(self.pdf_path) if os.path.isfile(self.pdf_path) else ""
         path, _ = QFileDialog.getOpenFileName(
@@ -681,13 +692,21 @@ class SignDialog(QDialog):
             thumbprint = self.cli_thumbprint_edit.text().strip()
             subject = self.cli_subject_edit.text().strip()
             container = self.cli_container_edit.text().strip()
-            if not (thumbprint or subject or container):
+            choose_certificate = self.cli_choose_checkbox.isChecked()
+            if choose_certificate and (thumbprint or subject or container):
+                QMessageBox.warning(
+                    self,
+                    "Выбор сертификата",
+                    "Снимите флаг выбора сертификата или очистите поля отпечатка/subject/контейнера.",
+                )
+                return
+            if not choose_certificate and not (thumbprint or subject or container):
                 QMessageBox.warning(
                     self,
                     "Нужен сертификат",
                     (
-                        "Укажите отпечаток сертификата. Его можно посмотреть в certmgr.msc → "
-                        "Сертификаты → Открыть сертификат → Сведения → Отпечаток."
+                        "Укажите отпечаток сертификата (certmgr.msc → Сертификаты → Открыть → "
+                        "Сведения → Отпечаток) или включите опцию выбора сертификата из хранилища."
                     ),
                 )
                 return
@@ -696,6 +715,7 @@ class SignDialog(QDialog):
                 "thumbprint": thumbprint or None,
                 "subject": subject or None,
                 "container": container or None,
+                "choose": choose_certificate,
                 "attached": self.cli_attached_radio.isChecked(),
                 "output_path": self.cli_output_edit.text().strip() or None,
                 "dry_run": self.cli_dry_run.isChecked(),
@@ -1108,6 +1128,7 @@ class MainWindow(QMainWindow):
                     thumbprint=result.get("thumbprint"),
                     subject=result.get("subject"),
                     container=result.get("container"),
+                    choose=result.get("choose", False),
                     dry_run=result.get("dry_run", False),
                 )
                 if result.get("attached"):
