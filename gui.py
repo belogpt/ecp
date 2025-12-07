@@ -52,6 +52,7 @@ from pdf_utils import (
     save_header_config,
 )
 from signature_utils import get_certificate_info, CertificateInfo
+from signing_utils import sign_pdf
 from paths import get_resource_path
 
 logger = logging.getLogger(__name__)
@@ -431,6 +432,97 @@ class HeaderSettingsDialog(QDialog):
         super().accept()
 
 
+class SignDialog(QDialog):
+    """Диалог для выбора сертификата и ключа перед подписью PDF."""
+
+    def __init__(self, pdf_path: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Подписать PDF ЭЦП")
+        self.pdf_path = pdf_path
+
+        form = QFormLayout()
+        form.addRow("Файл:", QLabel(os.path.basename(pdf_path)))
+
+        self.cert_edit = QLineEdit()
+        self.cert_btn = QPushButton("…")
+        self.cert_btn.setFixedWidth(32)
+        self.cert_btn.clicked.connect(self._browse_cert)
+
+        cert_layout = QHBoxLayout()
+        cert_layout.addWidget(self.cert_edit, 1)
+        cert_layout.addWidget(self.cert_btn)
+        form.addRow("Сертификат (.cer/.pem):", cert_layout)
+
+        self.key_edit = QLineEdit()
+        self.key_btn = QPushButton("…")
+        self.key_btn.setFixedWidth(32)
+        self.key_btn.clicked.connect(self._browse_key)
+
+        key_layout = QHBoxLayout()
+        key_layout.addWidget(self.key_edit, 1)
+        key_layout.addWidget(self.key_btn)
+        form.addRow("Закрытый ключ (.key/.pem):", key_layout)
+
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        form.addRow("Пароль к ключу (если есть):", self.password_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+
+        ok_btn = buttons.button(QDialogButtonBox.Ok)
+        cancel_btn = buttons.button(QDialogButtonBox.Cancel)
+        if ok_btn:
+            ok_btn.setText("Подписать")
+        if cancel_btn:
+            cancel_btn.setText("Отмена")
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def _browse_cert(self):
+        start_dir = os.path.dirname(self.pdf_path) if os.path.isfile(self.pdf_path) else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите файл сертификата",
+            start_dir,
+            "Сертификаты (*.cer *.pem *.crt);;Все файлы (*.*)",
+        )
+        if path:
+            self.cert_edit.setText(path)
+
+    def _browse_key(self):
+        start_dir = os.path.dirname(self.pdf_path) if os.path.isfile(self.pdf_path) else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите закрытый ключ",
+            start_dir,
+            "Ключи (*.key *.pem *.der);;Все файлы (*.*)",
+        )
+        if path:
+            self.key_edit.setText(path)
+
+    def _validate_and_accept(self):
+        cert_path = self.cert_edit.text().strip()
+        key_path = self.key_edit.text().strip()
+        if not cert_path or not os.path.exists(cert_path):
+            QMessageBox.warning(self, "Нет сертификата", "Укажите путь к файлу сертификата.")
+            return
+        if not key_path or not os.path.exists(key_path):
+            QMessageBox.warning(self, "Нет ключа", "Укажите путь к файлу закрытого ключа.")
+            return
+        super().accept()
+
+    def get_values(self):
+        return (
+            self.cert_edit.text().strip(),
+            self.key_edit.text().strip(),
+            self.password_edit.text(),
+        )
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -636,6 +728,11 @@ class MainWindow(QMainWindow):
         self.chk_show_sign_time.toggled.connect(self.on_show_sign_time_toggled)
         right_layout.addWidget(self.chk_show_sign_time)
 
+        self.btn_sign_pdf = QPushButton("Подписать текущий PDF")
+        self.btn_sign_pdf.setEnabled(False)
+        self.btn_sign_pdf.clicked.connect(self.on_sign_pdf_clicked)
+        right_layout.addWidget(self.btn_sign_pdf)
+
         self.btn_save = QPushButton("Сохранить файл с ЭЦП")
         self.btn_save.setEnabled(False)
         self.btn_save.clicked.connect(self.on_save_clicked)
@@ -720,6 +817,60 @@ class MainWindow(QMainWindow):
         dlg = HeaderSettingsDialog(self)
         if dlg.exec() == QDialog.Accepted:
             self.update_stamp_preview()
+
+    def on_sign_pdf_clicked(self):
+        if self.current_session_index < 0 or not self.doc:
+            QMessageBox.warning(self, "Нет файла", "Сначала выберите PDF для подписи.")
+            return
+
+        session = self.sessions[self.current_session_index]
+        dlg = SignDialog(session.pdf_path, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        cert_path, key_path, password = dlg.get_values()
+        try:
+            signature_path = sign_pdf(session.pdf_path, cert_path, key_path, password)
+        except Exception as e:
+            logger.exception("Ошибка создания подписи")
+            QMessageBox.critical(
+                self,
+                "Ошибка подписи",
+                f"Не удалось создать файл подписи:\n{e}",
+            )
+            return
+
+        session.p7s_path = signature_path
+        try:
+            session.cert_info = get_certificate_info(session.pdf_path, signature_path, None)
+            self.cert_info = session.cert_info
+        except Exception as e:
+            logger.exception("Ошибка чтения созданной подписи")
+            session.cert_info = CertificateInfo(status=f"ошибка подписи: {e}")
+            self.cert_info = session.cert_info
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Подпись создана, но не удалось прочитать информацию о сертификате."
+            )
+
+        self.rebuild_file_list()
+        for row in range(self.file_list.count()):
+            it = self.file_list.item(row)
+            if it and it.data(Qt.UserRole) == self.current_session_index:
+                self.file_list.setCurrentRow(row)
+                break
+        self.switch_to_session(self.current_session_index)
+        self.statusBar().showMessage(
+            f"Создан файл подписи: {os.path.basename(signature_path)}",
+            8000,
+        )
+        QMessageBox.information(
+            self,
+            "Подпись создана",
+            f"Файл подписи создан рядом с PDF:\n{signature_path}\n\n"
+            "Он автоматически добавлен в список для визуализации.",
+        )
 
     # ---------- добавление / удаление файлов ----------
 
@@ -1218,6 +1369,7 @@ class MainWindow(QMainWindow):
 
         has_sig = self._has_valid_signature(self.cert_info)
         self.btn_save.setEnabled(bool(self.doc) and has_sig)
+        self.btn_sign_pdf.setEnabled(bool(self.doc))
 
     def _make_stamp_info_dict(self) -> Dict[str, str]:
         info = self.cert_info or CertificateInfo()
@@ -1403,6 +1555,7 @@ class MainWindow(QMainWindow):
         self.thumb_list.clear()
         self.thumbs_widget.setVisible(False)
         self.btn_save.setEnabled(False)
+        self.btn_sign_pdf.setEnabled(False)
 
         for lbl in [
             self.lbl_serial,
