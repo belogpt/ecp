@@ -188,7 +188,7 @@ class BrowserSigningSession:
 <head>
   <meta charset=\"UTF-8\" />
   <title>Подпись PDF через CryptoPro</title>
-  <script src=\"https://www.cryptopro.ru/sites/default/files/products/cades/cadesplugin_api.js\"></script>
+  <script id=\"cadesScript\" src=\"https://www.cryptopro.ru/sites/default/files/products/cades/cadesplugin_api.js\" onerror=\"window._cadesScriptError=true;\"></script>
   <style>
     body {{ font-family: Arial, sans-serif; margin: 24px; }}
     .panel {{ max-width: 760px; margin: 0 auto; padding: 16px; border: 1px solid #d0d0d0; border-radius: 8px; }}
@@ -202,7 +202,7 @@ class BrowserSigningSession:
     <h2>Подпись PDF через браузерный плагин CryptoPro</h2>
     <p>Файл: <b>{os.path.basename(self.pdf_path)}</b></p>
     <p>Плагин запросит выбор сертификата и ввод PIN/пароля при необходимости. После успешной подписи окно можно закрыть.</p>
-    <button id=\"startBtn\">Выбрать сертификат и подписать</button>
+    <button id=\"startBtn\" type=\"button\">Выбрать сертификат и подписать</button>
     <div id=\"status\" class=\"log\"></div>
     <div id=\"error\" class=\"error\"></div>
   </div>
@@ -210,6 +210,8 @@ class BrowserSigningSession:
     const nonce = {json.dumps(self.nonce)};
     const postUrl = '/result';
     const pdfBase64 = {json.dumps(self._pdf_b64)};
+
+    const startBtn = document.getElementById('startBtn');
 
     function log(msg) {{
       const box = document.getElementById('status');
@@ -219,6 +221,12 @@ class BrowserSigningSession:
     function showError(msg) {{
       document.getElementById('error').textContent = msg;
       log('Ошибка: ' + msg);
+    }}
+
+    function setBusy(state) {{
+      if (!startBtn) return;
+      startBtn.disabled = state;
+      startBtn.textContent = state ? 'Подписание…' : 'Выбрать сертификат и подписать';
     }}
 
     async function sendResult(payload) {{
@@ -234,18 +242,40 @@ class BrowserSigningSession:
       }}
     }}
 
+    function waitForPluginLoad(timeoutMs = 12000) {{
+      if (window.cadesplugin) return Promise.resolve(window.cadesplugin);
+      if (window._cadesScriptError) return Promise.reject(new Error('Не удалось загрузить cadesplugin_api.js'));
+
+      return new Promise((resolve, reject) => {{
+        const timer = setTimeout(() => reject(new Error('Плагин CryptoPro не загрузился (таймаут)')), timeoutMs);
+        const script = document.getElementById('cadesScript');
+        if (!script) {{
+          clearTimeout(timer);
+          reject(new Error('Скрипт плагина не найден на странице'));
+          return;
+        }}
+        script.addEventListener('error', () => {{
+          clearTimeout(timer);
+          reject(new Error('Не удалось загрузить cadesplugin_api.js'));
+        }});
+        script.addEventListener('load', () => {{
+          clearTimeout(timer);
+          resolve(window.cadesplugin);
+        }});
+      }});
+    }}
+
     async function sign() {{
       document.getElementById('error').textContent = '';
       log('Проверяем наличие плагина CryptoPro...');
+      setBusy(true);
       try {{
-        if (!window.cadesplugin) {{
+        const plugin = await waitForPluginLoad();
+        if (!plugin) {{
           showError('Плагин CryptoPro не найден в браузере.');
           await sendResult({{nonce, status: 'error', error: 'Плагин CryptoPro не найден'}});
           return;
         }}
-
-        await window.cadesplugin;
-        const plugin = window.cadesplugin;
         log('Открываем хранилище сертификатов...');
         const store = await plugin.CreateObjectAsync('CAdESCOM.Store');
         await store.Open();
@@ -273,10 +303,19 @@ class BrowserSigningSession:
         const msg = (e && e.message) ? e.message : String(e);
         showError(msg);
         await sendResult({{nonce, status: 'error', error: msg}});
+      }} finally {{
+        setBusy(false);
       }}
     }}
 
     document.getElementById('startBtn').addEventListener('click', () => {{
+      log('Запущен процесс подписи по кнопке.');
+      sign();
+    }});
+
+    // Автостарт на случай если пользователь ожидает мгновенную реакцию
+    window.addEventListener('DOMContentLoaded', () => {{
+      log('Страница готова. Пробуем автоматически запустить подписание...');
       sign();
     }});
   </script>
