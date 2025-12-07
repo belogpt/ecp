@@ -280,6 +280,11 @@ class BrowserSigningSession:
             )
         self.plugin_script_sources = list(PLUGIN_SCRIPT_SOURCES)
         self._port = None
+        # Используем localhost в URL, чтобы CryptoPro браузерное расширение
+        # воспринимало origin как доверенный. Расширение может не отдавать
+        # API для адресов с явным IP (127.0.0.1), поэтому показываем ссылку
+        # через доменное имя.
+        self._hostname_for_browser = "localhost"
 
     def start(self):
         if self._server:
@@ -295,11 +300,16 @@ class BrowserSigningSession:
             logging.getLogger().addHandler(handler)
             # Явно фиксируем запуск в логе браузера, даже если уровень логгера повысился.
             self._append_log(
-                f"Браузерный сервер подписи запущен на 127.0.0.1:{self._port}"
+                f"Браузерный сервер подписи запущен на {self._hostname_for_browser}:{self._port}"
             )
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
-        logger.info("Браузерный сервер подписи запущен на 127.0.0.1:%s", self._port)
+        logger.info(
+            "Браузерный сервер подписи запущен на 127.0.0.1:%s (открывать: http://%s:%s)",
+            self._port,
+            self._hostname_for_browser,
+            self._port,
+        )
 
     def stop(self):
         if self._server:
@@ -317,7 +327,7 @@ class BrowserSigningSession:
     def url(self) -> str:
         if self._port is None:
             raise BrowserSigningError("Сервер ещё не запущен")
-        return f"http://127.0.0.1:{self._port}/?nonce={self.nonce}"
+        return f"http://{self._hostname_for_browser}:{self._port}/?nonce={self.nonce}"
 
     @property
     def pdf_b64(self) -> str:
