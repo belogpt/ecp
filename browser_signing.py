@@ -221,6 +221,10 @@ class BrowserSigningSession:
             handler.setLevel(logging.DEBUG)
             self._log_handler = handler
             logging.getLogger().addHandler(handler)
+            # Явно фиксируем запуск в логе браузера, даже если уровень логгера повысился.
+            self._append_log(
+                f"Браузерный сервер подписи запущен на 127.0.0.1:{self._port}"
+            )
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         logger.info("Браузерный сервер подписи запущен на 127.0.0.1:%s", self._port)
@@ -309,6 +313,7 @@ class BrowserSigningSession:
     const startBtn = document.getElementById('startBtn');
 
     function log(msg) {{
+      console.log('[CryptoProPage]', msg);
       const box = document.getElementById('status');
       box.textContent += msg + '\n';
       box.scrollTop = box.scrollHeight;
