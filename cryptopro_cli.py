@@ -36,17 +36,30 @@ def find_cryptopro_tools() -> str:
         logger.debug("cryptcp найден в PATH: %s", path)
         return path
 
-    if platform.system().lower().startswith("win"):
+    system = platform.system().lower()
+    if system.startswith("win"):
         candidates = [
             r"C:\\Program Files\\Crypto Pro\\CSP\\cryptcp.exe",
             r"C:\\Program Files (x86)\\Crypto Pro\\CSP\\cryptcp.exe",
             r"C:\\Program Files\\CryptoPro\\CSP\\cryptcp.exe",
             r"C:\\Program Files (x86)\\CryptoPro\\CSP\\cryptcp.exe",
         ]
-        for candidate in candidates:
-            if os.path.isfile(candidate):
-                logger.debug("cryptcp найден по умолчанию: %s", candidate)
-                return candidate
+    elif system == "linux":
+        candidates = [
+            "/opt/cprocsp/bin/amd64/cryptcp",
+            "/opt/cprocsp/bin/ia32/cryptcp",
+        ]
+    elif system == "darwin":
+        candidates = [
+            "/Applications/CryptoPro/CSP/cryptcp",
+        ]
+    else:
+        candidates = []
+
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            logger.debug("cryptcp найден по умолчанию: %s", candidate)
+            return candidate
 
     raise CryptoProNotFoundError(
         "Утилита cryptcp не найдена. Установите CryptoPro CSP и убедитесь, что cryptcp доступен."
