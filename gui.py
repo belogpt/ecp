@@ -47,6 +47,8 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSpacerItem,
     QSizePolicy,
+    QRadioButton,
+    QButtonGroup,
 )
 
 from pdf_utils import (
@@ -59,6 +61,12 @@ from pdf_utils import (
 from signature_utils import get_certificate_info, CertificateInfo
 from signing_utils import sign_pdf, sign_pdf_with_pkcs11
 from browser_signing import BrowserSigningSession, BrowserSigningError
+from cryptopro_cli import (
+    CertificateSelectorError,
+    CryptoProNotFoundError,
+    sign_file_attached,
+    sign_file_detached,
+)
 from paths import get_resource_path
 
 logger = logging.getLogger(__name__)
@@ -450,6 +458,9 @@ class SignDialog(QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._build_files_tab(), "Файлы сертификата и ключа")
         tabs.addTab(self._build_pkcs11_tab(), "Токен PKCS#11")
+        self.cli_tab_index = tabs.addTab(
+            self._build_cryptopro_cli_tab(), "CryptoPro CLI"
+        )
         self.browser_tab_index = tabs.addTab(
             self._build_browser_tab(), "Через браузер (CryptoPro)"
         )
@@ -499,6 +510,47 @@ class SignDialog(QDialog):
         self.password_edit = QLineEdit()
         self.password_edit.setEchoMode(QLineEdit.Password)
         form.addRow("Пароль к ключу (если есть):", self.password_edit)
+
+        form.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        return widget
+
+    # --- вкладка CryptoPro CLI ---
+    def _build_cryptopro_cli_tab(self):
+        widget = QWidget()
+        form = QFormLayout(widget)
+        form.addRow("Файл:", QLabel(os.path.basename(self.pdf_path)))
+
+        self.cli_thumbprint_edit = QLineEdit()
+        form.addRow("Отпечаток сертификата:", self.cli_thumbprint_edit)
+
+        self.cli_subject_edit = QLineEdit()
+        form.addRow("Subject (резервно):", self.cli_subject_edit)
+
+        self.cli_container_edit = QLineEdit()
+        form.addRow("Контейнер (резервно):", self.cli_container_edit)
+
+        self.cli_detached_radio = QRadioButton("Отсоединённая (.sig)")
+        self.cli_attached_radio = QRadioButton("Присоединённая (.p7m)")
+        self.cli_detached_radio.setChecked(True)
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(self.cli_detached_radio)
+        mode_layout.addWidget(self.cli_attached_radio)
+        self.cli_mode_group = QButtonGroup(widget)
+        self.cli_mode_group.addButton(self.cli_detached_radio)
+        self.cli_mode_group.addButton(self.cli_attached_radio)
+        form.addRow("Формат подписи:", mode_layout)
+
+        self.cli_output_edit = QLineEdit()
+        form.addRow("Выходной файл (опц.):", self.cli_output_edit)
+
+        self.cli_dry_run = QCheckBox("Показать команду без выполнения (dry-run)")
+        form.addRow("", self.cli_dry_run)
+
+        hint = QLabel(
+            "Нужен установленный CryptoPro CSP и доступ к утилите cryptcp."
+        )
+        hint.setWordWrap(True)
+        form.addRow("", hint)
 
         form.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
         return widget
@@ -624,6 +676,29 @@ class SignDialog(QDialog):
                 "cert_path": cert_path,
                 "key_path": key_path,
                 "password": self.password_edit.text(),
+            }
+        elif self.tabs.currentIndex() == self.cli_tab_index:
+            thumbprint = self.cli_thumbprint_edit.text().strip()
+            subject = self.cli_subject_edit.text().strip()
+            container = self.cli_container_edit.text().strip()
+            if not (thumbprint or subject or container):
+                QMessageBox.warning(
+                    self,
+                    "Нужен сертификат",
+                    (
+                        "Укажите отпечаток сертификата. Его можно посмотреть в certmgr.msc → "
+                        "Сертификаты → Открыть сертификат → Сведения → Отпечаток."
+                    ),
+                )
+                return
+            self._result = {
+                "mode": "cryptopro_cli",
+                "thumbprint": thumbprint or None,
+                "subject": subject or None,
+                "container": container or None,
+                "attached": self.cli_attached_radio.isChecked(),
+                "output_path": self.cli_output_edit.text().strip() or None,
+                "dry_run": self.cli_dry_run.isChecked(),
             }
         elif self.tabs.currentIndex() == self.browser_tab_index:
             self._result = {"mode": "browser"}
@@ -1028,6 +1103,26 @@ class MainWindow(QMainWindow):
                 )
             elif result["mode"] == "browser":
                 signature_path = self._sign_pdf_via_browser(session.pdf_path)
+            elif result["mode"] == "cryptopro_cli":
+                cli_kwargs = dict(
+                    thumbprint=result.get("thumbprint"),
+                    subject=result.get("subject"),
+                    container=result.get("container"),
+                    dry_run=result.get("dry_run", False),
+                )
+                if result.get("attached"):
+                    signature_path = sign_file_attached(
+                        session.pdf_path,
+                        output_path=result.get("output_path"),
+                        **cli_kwargs,
+                    )
+                else:
+                    signature_path = sign_file_detached(
+                        session.pdf_path,
+                        output_sig_path=result.get("output_path"),
+                        **cli_kwargs,
+                    )
+                signature_path = str(signature_path)
             else:
                 signature_path = sign_pdf_with_pkcs11(
                     session.pdf_path,
@@ -1038,7 +1133,7 @@ class MainWindow(QMainWindow):
                     key_label=result.get("key_label"),
                     cert_path=result.get("cert_path"),
                 )
-        except Exception as e:
+        except (CertificateSelectorError, CryptoProNotFoundError, Exception) as e:
             logger.exception("Ошибка создания подписи")
             QMessageBox.critical(
                 self,

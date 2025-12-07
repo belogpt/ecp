@@ -65,6 +65,46 @@ pip install PySide6 PyMuPDF asn1crypto cryptography
 - `timesnrcyrmt.ttf` — кириллический Times New Roman (или совместимый).
   Если его нет, используется системный *Times New Roman*, а если и его нет — шрифт Qt по умолчанию.
 
+### CryptoPro CSP и подпись через CLI
+
+Для командной подписи без браузера установите **CryptoPro CSP** (версия с утилитой `cryptcp`).
+
+Проверка наличия `cryptcp`:
+
+```bash
+cryptcp -help
+```
+
+Если утилита не найдена, убедитесь, что CryptoPro установлен и путь к `cryptcp` добавлен в переменную окружения `PATH` (или лежит в типовой папке `C:\Program Files\Crypto Pro\CSP\cryptcp.exe`).
+
+Примеры команд (desktop/CLI режим):
+
+- Отсоединённая подпись PDF:
+
+  ```bash
+  python signer_cli.py sign --file sample.pdf --detached --thumbprint "<отпечаток>"
+  ```
+
+- Присоединённая подпись:
+
+  ```bash
+  python signer_cli.py sign --file sample.pdf --attached --thumbprint "<отпечаток>"
+  ```
+
+- Проверка detached подписи:
+
+  ```bash
+  python signer_cli.py verify --file sample.pdf --sig sample.pdf.sig
+  ```
+
+Используйте флаг `--dry-run`, чтобы увидеть команду `cryptcp` без выполнения.
+
+Типичные ошибки:
+
+- `Утилита cryptcp не найдена` — установите CryptoPro CSP или поправьте `PATH`.
+- `Не указан сертификат. Передайте отпечаток сертификата через --thumbprint` — укажите отпечаток (certmgr.msc → Сведения → Отпечаток).
+- `Файл для подписи не найден` — проверьте путь к входному файлу или подписи.
+
 ## 3.1. Сборка в один файл через PyInstaller
 
 Для корректного включения иконки и справки используйте ключи `--add-data` при сборке, например:
