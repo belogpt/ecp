@@ -285,7 +285,77 @@ class BrowserSigningSession:
 <head>
   <meta charset=\"UTF-8\" />
   <title>Подпись PDF через CryptoPro</title>
-  <script id=\"cadesScript\" src=\"https://www.cryptopro.ru/sites/default/files/products/cades/cadesplugin_api.js\" onerror=\"window._cadesScriptError=true;\"></script>
+  <script>
+    const pluginScriptSources = [
+      // Основной источник CryptoPro
+      'https://www.cryptopro.ru/sites/default/files/products/cades/cadesplugin_api.js',
+      // Расширение для Chromium/Chrome/Edge
+      'chrome-extension://iifchhfnnmpdbibifmljnfjhpififfog/nmcades_plugin_api.js',
+      // Резервный идентификатор расширения (иногда меняется после переподписания)
+      'chrome-extension://epiejncknlhcgcanmnmnjnmghjkpgkdd/nmcades_plugin_api.js',
+    ];
+
+    function appendScript(url, timeoutMs = 8000) {{
+      return new Promise((resolve, reject) => {{
+        const script = document.createElement('script');
+        script.src = url;
+        script.async = true;
+
+        const timer = setTimeout(() => {{
+          cleanup();
+          reject(new Error('таймаут загрузки скрипта'));
+        }}, timeoutMs);
+
+        function cleanup() {{
+          clearTimeout(timer);
+          script.onerror = null;
+          script.onload = null;
+        }}
+
+        script.onerror = () => {{
+          cleanup();
+          reject(new Error('ошибка загрузки скрипта'));
+        }};
+        script.onload = () => {{
+          cleanup();
+          resolve();
+        }};
+
+        document.head.appendChild(script);
+      }});
+    }}
+
+    async function ensureCadespluginReady() {{
+      const plugin = window.cadesplugin;
+      if (!plugin) return null;
+      if (typeof plugin.then === 'function') {{
+        await plugin;
+      }}
+      return window.cadesplugin;
+    }}
+
+    async function loadCadesPlugin() {{
+      if (window.cadesplugin) {{
+        return ensureCadespluginReady();
+      }}
+
+      let lastError = null;
+      for (const src of pluginScriptSources) {{
+        try {{
+          log('Пробуем загрузить cadesplugin_api.js: ' + src);
+          await appendScript(src);
+          const plugin = await ensureCadespluginReady();
+          if (plugin) return plugin;
+          lastError = new Error('cadesplugin_api.js загружен, но объект плагина не появился');
+        }} catch (e) {{
+          lastError = e;
+          log('Не удалось загрузить cadesplugin_api.js из ' + src + ': ' + e.message);
+        }}
+      }}
+
+      throw lastError || new Error('Плагин CryptoPro не найден');
+    }}
+  </script>
   <style>
     body {{ font-family: Arial, sans-serif; margin: 24px; }}
     .panel {{ max-width: 760px; margin: 0 auto; padding: 16px; border: 1px solid #d0d0d0; border-radius: 8px; }}
@@ -364,27 +434,21 @@ class BrowserSigningSession:
       }}
     }}
 
-    function waitForPluginLoad(timeoutMs = 12000) {{
-      if (window.cadesplugin) return Promise.resolve(window.cadesplugin);
-      if (window._cadesScriptError) return Promise.reject(new Error('Не удалось загрузить cadesplugin_api.js'));
-
-      return new Promise((resolve, reject) => {{
-        const timer = setTimeout(() => reject(new Error('Плагин CryptoPro не загрузился (таймаут)')), timeoutMs);
-        const script = document.getElementById('cadesScript');
-        if (!script) {{
-          clearTimeout(timer);
-          reject(new Error('Скрипт плагина не найден на странице'));
-          return;
-        }}
-        script.addEventListener('error', () => {{
-          clearTimeout(timer);
-          reject(new Error('Не удалось загрузить cadesplugin_api.js'));
-        }});
-        script.addEventListener('load', () => {{
-          clearTimeout(timer);
-          resolve(window.cadesplugin);
-        }});
+    async function waitForPluginLoad(timeoutMs = 12000) {{
+      let timer = null;
+      const timeoutPromise = new Promise((_, reject) => {{
+        timer = setTimeout(() => reject(new Error('Плагин CryptoPro не загрузился (таймаут)')), timeoutMs);
       }});
+
+      try {{
+        const plugin = await Promise.race([loadCadesPlugin(), timeoutPromise]);
+        if (!plugin) {{
+          throw new Error('Плагин CryptoPro не найден');
+        }}
+        return plugin;
+      }} finally {{
+        if (timer) clearTimeout(timer);
+      }}
     }}
 
     async function sign() {{
