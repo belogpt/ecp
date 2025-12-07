@@ -75,7 +75,7 @@ pip install PySide6 PyMuPDF asn1crypto cryptography
 cryptcp -help
 ```
 
-Если утилита не найдена, убедитесь, что CryptoPro установлен и путь к `cryptcp` добавлен в переменную окружения `PATH` (или лежит в типовой папке `C:\Program Files\Crypto Pro\CSP\cryptcp.exe`).
+Если утилита не найдена, убедитесь, что CryptoPro установлен и путь к `cryptcp` добавлен в переменную окружения `PATH`. На Windows также проверяется типовая папка `C:\\Program Files\\Crypto Pro\\CSP\\cryptcp.exe`; на Linux — стандартные каталоги `/opt/cprocsp/bin/amd64/cryptcp` и `/opt/cprocsp/bin/ia32/cryptcp`.
 
 Примеры команд (desktop/CLI режим):
 
