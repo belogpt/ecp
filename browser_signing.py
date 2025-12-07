@@ -17,6 +17,22 @@ from urllib.parse import parse_qs, urlparse
 logger = logging.getLogger(__name__)
 
 
+class _SessionLogHandler(logging.Handler):
+    def __init__(self, session: "BrowserSigningSession"):
+        super().__init__()
+        self.session = session
+        self.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+
+    def emit(self, record):  # pragma: no cover - используется только в рантайме
+        try:
+            message = self.format(record)
+        except Exception:
+            return
+        self.session._append_log(message)
+
+
 @dataclass
 class BrowserSigningResult:
     signature: bytes
@@ -59,6 +75,9 @@ class _BrowserSigningHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
         logger.debug("GET %s от %s", parsed.path, self.client_address[0])
+        if parsed.path == "/logs":
+            self._handle_logs(parsed)
+            return
         if parsed.path != "/":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -75,6 +94,36 @@ class _BrowserSigningHandler(BaseHTTPRequestHandler):
         data = body.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _handle_logs(self, parsed):
+        params = parse_qs(parsed.query)
+        nonce = (params.get("nonce") or [None])[0]
+        if nonce != self.session.nonce:
+            logger.warning(
+                "Запрос логов с неверным nonce от %s: %s", self.client_address[0], nonce
+            )
+            self._reject(HTTPStatus.FORBIDDEN, "Invalid nonce")
+            return
+
+        if not self.session.log_to_page:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        after_raw = (params.get("after") or ["0"])[0]
+        try:
+            after = int(after_raw)
+        except ValueError:
+            logger.debug("Некорректный параметр after в запросе логов: %s", after_raw)
+            after = 0
+
+        last_id, items = self.session.get_logs_since(after)
+        payload = json.dumps({"last": last_id, "items": items}, ensure_ascii=False)
+        data = payload.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -141,7 +190,7 @@ class _BrowserSigningHandler(BaseHTTPRequestHandler):
 class BrowserSigningSession:
     """Организует цикл ожидания подписи через браузерный плагин CryptoPro."""
 
-    def __init__(self, pdf_path: str):
+    def __init__(self, pdf_path: str, log_to_page: bool = True):
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF не найден: {pdf_path}")
         self.pdf_path = pdf_path
@@ -150,6 +199,10 @@ class BrowserSigningSession:
         self._result: Optional[BrowserSigningResult] = None
         self._error: Optional[str] = None
         self._event = threading.Event()
+        self._log_lock = threading.Lock()
+        self._log_entries: list[str] = []
+        self._log_handler: Optional[_SessionLogHandler] = None
+        self.log_to_page = log_to_page
         self.nonce = secrets.token_urlsafe(24)
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
@@ -163,6 +216,11 @@ class BrowserSigningSession:
         handler = self._build_handler()
         self._server = ThreadingHTTPServer(("127.0.0.1", self._port), handler)
         self._server.session = self  # type: ignore[attr-defined]
+        if self.log_to_page and not self._log_handler:
+            handler = _SessionLogHandler(self)
+            handler.setLevel(logging.DEBUG)
+            self._log_handler = handler
+            logging.getLogger().addHandler(handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         logger.info("Браузерный сервер подписи запущен на 127.0.0.1:%s", self._port)
@@ -176,6 +234,9 @@ class BrowserSigningSession:
         if self._thread:
             self._thread.join(timeout=2.0)
             self._thread = None
+        if self._log_handler:
+            logging.getLogger().removeHandler(self._log_handler)
+            self._log_handler = None
 
     def url(self) -> str:
         if self._port is None:
@@ -209,6 +270,11 @@ class BrowserSigningSession:
         self._event.set()
 
     def render_page(self) -> str:
+        initial_logs = []
+        if self.log_to_page:
+            last_id, initial_logs = self.get_logs_since(0)
+        else:
+            last_id = 0
         return f"""
 <!doctype html>
 <html lang=\"ru\">
@@ -237,6 +303,8 @@ class BrowserSigningSession:
     const nonce = {json.dumps(self.nonce)};
     const postUrl = '/result';
     const pdfBase64 = {json.dumps(self._pdf_b64)};
+    const logEnabled = {json.dumps(self.log_to_page)};
+    let lastLogId = {json.dumps(last_id)};
 
     const startBtn = document.getElementById('startBtn');
 
@@ -248,6 +316,28 @@ class BrowserSigningSession:
     function showError(msg) {{
       document.getElementById('error').textContent = msg;
       log('Ошибка: ' + msg);
+    }}
+
+    function applyPythonLogs(items) {{
+      if (!items || !items.length) return;
+      items.forEach((item) => log('[Python] ' + item));
+    }}
+
+    async function pollPythonLogs() {{
+      if (!logEnabled) return;
+      try {{
+        const resp = await fetch(`/logs?nonce=${{encodeURIComponent(nonce)}}&after=${{lastLogId}}`);
+        if (!resp.ok) throw new Error(`HTTP ${{resp.status}}`);
+        const data = await resp.json();
+        applyPythonLogs(data.items || []);
+        if (typeof data.last === 'number') {{
+          lastLogId = data.last;
+        }}
+      }} catch (e) {{
+        console.warn('Не удалось получить логи сервера:', e);
+      }} finally {{
+        if (logEnabled) setTimeout(pollPythonLogs, 1500);
+      }}
     }}
 
     function setBusy(state) {{
@@ -343,12 +433,26 @@ class BrowserSigningSession:
     // Автостарт на случай если пользователь ожидает мгновенную реакцию
     window.addEventListener('DOMContentLoaded', () => {{
       log('Страница готова. Пробуем автоматически запустить подписание...');
+      applyPythonLogs({json.dumps(initial_logs)});
+      if (logEnabled) pollPythonLogs();
       sign();
     }});
   </script>
 </body>
 </html>
 """
+
+    def _append_log(self, message: str):
+        with self._log_lock:
+            self._log_entries.append(message)
+            if len(self._log_entries) > 500:
+                self._log_entries = self._log_entries[-500:]
+
+    def get_logs_since(self, last_id: int) -> tuple[int, list[str]]:
+        with self._log_lock:
+            next_id = max(0, last_id)
+            items = self._log_entries[next_id:]
+            return len(self._log_entries), items
 
     @staticmethod
     def _find_free_port() -> int:
