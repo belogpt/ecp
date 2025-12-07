@@ -13,18 +13,39 @@ except Exception:  # pragma: no cover - win32com может отсутствов
     win32com = None
     pywintypes = None
 
+if win32com is not None:  # pragma: no cover - зависит от среды Windows
+    try:
+        ensure_dispatch = win32com.client.gencache.EnsureDispatch
+        com_constants = win32com.client.constants
+    except Exception:
+        ensure_dispatch = win32com.client.Dispatch
+        com_constants = None
+else:
+    ensure_dispatch = None
+    com_constants = None
+
 logger = logging.getLogger(__name__)
 
-# Константы CAPICOM/CAdESCOM
-CAPICOM_LOCAL_MACHINE_STORE = 1
-CAPICOM_CURRENT_USER_STORE = 2
-CAPICOM_MY_STORE = "My"
-CAPICOM_STORE_OPEN_READ_ONLY = 0
-CAPICOM_CERTIFICATE_FIND_SHA1_HASH = 0
-CADESCOM_CADES_BES = 1
-CADESCOM_ENCODE_BASE64 = 0
-CADESCOM_ENCODE_BINARY = 1
-CADESCOM_BASE64_TO_BINARY = 1
+
+def _const(name: str, fallback):  # pragma: no cover - простая функция
+    if com_constants is None:
+        return fallback
+    try:
+        return getattr(com_constants, name)
+    except Exception:
+        return fallback
+
+
+CAPICOM_LOCAL_MACHINE_STORE = _const("CAPICOM_LOCAL_MACHINE_STORE", 1)
+CAPICOM_CURRENT_USER_STORE = _const("CAPICOM_CURRENT_USER_STORE", 2)
+CAPICOM_MY_STORE = _const("CAPICOM_MY_STORE", "My")
+CAPICOM_STORE_OPEN_READ_ONLY = _const("CAPICOM_STORE_OPEN_READ_ONLY", 0)
+CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED = _const("CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED", 2)
+CAPICOM_CERTIFICATE_FIND_SHA1_HASH = _const("CAPICOM_CERTIFICATE_FIND_SHA1_HASH", 0)
+CADESCOM_CADES_BES = _const("CADESCOM_CADES_BES", 1)
+CADESCOM_ENCODE_BASE64 = _const("CADESCOM_ENCODE_BASE64", 0)
+CADESCOM_ENCODE_BINARY = _const("CADESCOM_ENCODE_BINARY", 1)
+CADESCOM_BASE64_TO_BINARY = _const("CADESCOM_BASE64_TO_BINARY", 1)
 
 
 class SignerCadescomError(RuntimeError):
@@ -39,7 +60,7 @@ class CertificateSummary:
     not_after: datetime.datetime
     thumbprint: str
     has_private_key: bool
-    is_valid: bool
+    is_valid: Optional[bool]
 
     @property
     def common_name(self) -> str:
@@ -64,7 +85,7 @@ def _ensure_com_available():
 
 def _dispatch(prog_id: str):
     try:
-        return win32com.client.Dispatch(prog_id)
+        return ensure_dispatch(prog_id)
     except Exception as exc:  # pragma: no cover - зависит от окружения Windows
         message = str(exc)
         if "Class not registered" in message:
@@ -74,9 +95,9 @@ def _dispatch(prog_id: str):
         raise
 
 
-def _open_store(location: int):
+def _open_store(location: int, open_mode: int):
     store = _dispatch("CAdESCOM.Store")
-    store.Open(location, CAPICOM_MY_STORE, CAPICOM_STORE_OPEN_READ_ONLY)
+    store.Open(location, CAPICOM_MY_STORE, open_mode)
     return store
 
 
@@ -91,13 +112,26 @@ def _safe_is_valid(cert) -> bool:
         logger.warning(
             "Не удалось проверить валидность сертификата %s", thumbprint, exc_info=True
         )
-        return True
+        return False
+
+
+def _log_com_error(exc, message: str):
+    if pywintypes is not None and isinstance(exc, pywintypes.com_error):
+        logger.error(
+            "%s (hresult=%s excepinfo=%s)",
+            message,
+            hex(getattr(exc, "hresult", 0)),
+            getattr(exc, "excepinfo", None),
+            exc_info=True,
+        )
+    else:
+        logger.exception(message)
 
 
 def _collect_store(location: int) -> List[CertificateSummary]:
     certificates: List[CertificateSummary] = []
     try:
-        store = _open_store(location)
+        store = _open_store(location, CAPICOM_STORE_OPEN_READ_ONLY)
     except SignerCadescomError:
         raise
     except Exception as exc:  # pragma: no cover - зависит от ОС
@@ -107,11 +141,30 @@ def _collect_store(location: int) -> List[CertificateSummary]:
         ) from exc
 
     try:
-        for cert in list(store.Certificates):
+        certs = store.Certificates
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for i in range(1, certs.Count + 1):
+            cert = certs.Item(i)
             try:
                 thumbprint = cert.Thumbprint
                 has_private_key = bool(getattr(cert, "HasPrivateKey", False))
-                is_valid = _safe_is_valid(cert)
+                not_before = cert.ValidFromDate
+                not_after = cert.ValidToDate
+
+                not_before_dt = (
+                    not_before
+                    if not_before.tzinfo is not None
+                    else not_before.replace(tzinfo=datetime.timezone.utc)
+                )
+                not_after_dt = (
+                    not_after
+                    if not_after.tzinfo is not None
+                    else not_after.replace(tzinfo=datetime.timezone.utc)
+                )
+                try:
+                    is_valid = not_before_dt <= now <= not_after_dt
+                except Exception:
+                    is_valid = None
                 certificates.append(
                     CertificateSummary(
                         subject=str(cert.SubjectName),
@@ -223,8 +276,11 @@ def sign_file(
     if encoding not in ("base64", "der"):
         raise ValueError("encoding должен быть 'base64' или 'der'")
 
+    store = None
     try:
-        store = _open_store(CAPICOM_CURRENT_USER_STORE)
+        store = _open_store(
+            CAPICOM_CURRENT_USER_STORE, CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED
+        )
     except SignerCadescomError:
         raise
     except Exception as exc:  # pragma: no cover - зависит от ОС
@@ -235,66 +291,91 @@ def sign_file(
 
     try:
         certificate = _select_certificate(store, thumbprint)
-    finally:
+
+        if not getattr(certificate, "HasPrivateKey", False):
+            raise SignerCadescomError("Сертификат без доступа к закрытому ключу")
+
         try:
-            store.Close()
-        except Exception:
-            pass
-
-    if not getattr(certificate, "HasPrivateKey", False):
-        raise SignerCadescomError("Сертификат без доступа к закрытому ключу")
-
-    try:
-        signer = _dispatch("CAdESCOM.CPSigner")
-        signer.Certificate = certificate
-    except SignerCadescomError:
-        raise
-    except Exception as exc:  # pragma: no cover - зависит от окружения
-        logger.exception("Ошибка подготовки подписанта")
-        raise SignerCadescomError(
-            "Не удалось подготовить подписанта CAdESCOM"
-        ) from exc
-
-    try:
-        signed_data = _dispatch("CAdESCOM.CadesSignedData")
-    except SignerCadescomError:
-        raise
-    except Exception as exc:  # pragma: no cover
-        logger.exception("Ошибка создания CadesSignedData")
-        raise SignerCadescomError("Не удалось создать объект CadesSignedData") from exc
-
-    with open(input_path, "rb") as f:
-        content_bytes = f.read()
-
-    signed_data.ContentEncoding = CADESCOM_BASE64_TO_BINARY
-    signed_data.Content = base64.b64encode(content_bytes).decode("ascii")
-
-    encoding_type = CADESCOM_ENCODE_BASE64 if encoding == "base64" else CADESCOM_ENCODE_BINARY
-
-    try:
-        raw_signature = signed_data.SignCades(
-            signer, CADESCOM_CADES_BES, detached, encoding_type
-        )
-    except Exception as exc:  # pragma: no cover - зависит от токена/сертификата
-        message = str(exc)
-        logger.exception("Ошибка подписи через CAdESCOM")
-        if "0x80090016" in message or "NTE_BAD_KEYSET" in message:
-            raise SignerCadescomError("Требуется подключить носитель ключа") from exc
-        if "0x8009000D" in message:
-            raise SignerCadescomError("Сертификат без доступа к закрытому ключу") from exc
-        if "Class not registered" in message:
+            signer = _dispatch("CAdESCOM.CPSigner")
+            signer.Certificate = certificate
+        except SignerCadescomError:
+            raise
+        except Exception as exc:  # pragma: no cover - зависит от окружения
+            logger.exception("Ошибка подготовки подписанта")
             raise SignerCadescomError(
-                "CADESCOM не зарегистрирован/несовпадение разрядности"
+                "Не удалось подготовить подписанта CAdESCOM"
             ) from exc
-        raise SignerCadescomError("Не удалось создать подпись через CAdESCOM") from exc
 
-    signature_bytes = _encode_signature(raw_signature, encoding)
+        try:
+            signed_data = _dispatch("CAdESCOM.CadesSignedData")
+        except SignerCadescomError:
+            raise
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Ошибка создания CadesSignedData")
+            raise SignerCadescomError(
+                "Не удалось создать объект CadesSignedData"
+            ) from exc
 
-    if not output_path:
-        output_path = f"{input_path}.p7s"
+        with open(input_path, "rb") as f:
+            content_bytes = f.read()
 
-    with open(output_path, "wb") as f:
-        f.write(signature_bytes)
+        signed_data.ContentEncoding = CADESCOM_BASE64_TO_BINARY
+        signed_data.Content = base64.b64encode(content_bytes).decode("ascii")
 
-    logger.info("Подпись создана через CAdESCOM: %s", output_path)
-    return output_path
+        encoding_type = (
+            CADESCOM_ENCODE_BASE64
+            if encoding == "base64"
+            else CADESCOM_ENCODE_BINARY
+        )
+
+        try:
+            raw_signature = signed_data.SignCades(
+                signer, CADESCOM_CADES_BES, detached, encoding_type
+            )
+        except SignerCadescomError:
+            raise
+        except pywintypes.com_error as exc:  # pragma: no cover - зависит от токена/сертификата
+            message = str(exc)
+            _log_com_error(exc, "Ошибка подписи через CAdESCOM (COM)")
+            if "0x80090016" in message or "NTE_BAD_KEYSET" in message:
+                raise SignerCadescomError("Требуется подключить носитель ключа") from exc
+            if "0x8009000D" in message:
+                raise SignerCadescomError(
+                    "Сертификат без доступа к закрытому ключу"
+                ) from exc
+            if "Class not registered" in message:
+                raise SignerCadescomError(
+                    "CADESCOM не зарегистрирован/несовпадение разрядности"
+                ) from exc
+            raise SignerCadescomError(
+                "Не удалось создать подпись через CAdESCOM"
+            ) from exc
+        except Exception as exc:  # pragma: no cover - зависит от токена/сертификата
+            message = str(exc)
+            logger.exception("Ошибка подписи через CAdESCOM")
+            if "0x80090016" in message or "NTE_BAD_KEYSET" in message:
+                raise SignerCadescomError("Требуется подключить носитель ключа") from exc
+            if "0x8009000D" in message:
+                raise SignerCadescomError("Сертификат без доступа к закрытому ключу") from exc
+            if "Class not registered" in message:
+                raise SignerCadescomError(
+                    "CADESCOM не зарегистрирован/несовпадение разрядности"
+                ) from exc
+            raise SignerCadescomError("Не удалось создать подпись через CAdESCOM") from exc
+
+        signature_bytes = _encode_signature(raw_signature, encoding)
+
+        if not output_path:
+            output_path = f"{input_path}.p7s"
+
+        with open(output_path, "wb") as f:
+            f.write(signature_bytes)
+
+        logger.info("Подпись создана через CAdESCOM: %s", output_path)
+        return output_path
+    finally:
+        if store is not None:
+            try:
+                store.Close()
+            except Exception:
+                pass
