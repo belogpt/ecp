@@ -69,8 +69,19 @@ def _resolve_output_path(default_suffix: str, explicit_output: Optional[str], in
 
 
 def _build_selector_args(
-    thumbprint: Optional[str], subject: Optional[str], container: Optional[str]
+    thumbprint: Optional[str],
+    subject: Optional[str],
+    container: Optional[str],
+    *,
+    choose_certificate: bool = False,
 ) -> List[str]:
+    if choose_certificate:
+        if thumbprint or subject or container:
+            raise CertificateSelectorError(
+                "Опция выбора сертификата (--choose) несовместима с явным указанием сертификата",
+            )
+        return ["-choose"]
+
     if thumbprint:
         return ["-thumbprint", thumbprint]
     if subject:
@@ -79,8 +90,7 @@ def _build_selector_args(
         return ["-cont", container]
 
     raise CertificateSelectorError(
-        "Не указан сертификат. Передайте отпечаток сертификата через --thumbprint. "
-        "Отпечаток можно посмотреть в certmgr.msc → Сертификаты → Открыть сертификат → Сведения → Отпечаток."
+        "Не указан сертификат. Передайте отпечаток сертификата через --thumbprint или используйте --choose для выбора установленного сертификата."
     )
 
 
@@ -146,13 +156,19 @@ def sign_file_detached(
     thumbprint: Optional[str] = None,
     subject: Optional[str] = None,
     container: Optional[str] = None,
+    choose: bool = False,
     *,
     dry_run: bool = False,
     tool_path: Optional[str] = None,
 ) -> Path:
     src = _ensure_input_file(input_path)
     dst = _resolve_output_path(".sig", output_sig_path, src)
-    selector_args = _build_selector_args(thumbprint, subject, container)
+    selector_args = _build_selector_args(
+        thumbprint,
+        subject,
+        container,
+        choose_certificate=choose,
+    )
     cmd = _prepare_command(
         CRYPTCP_FLAGS["sign_detached"],
         src,
@@ -170,13 +186,19 @@ def sign_file_attached(
     thumbprint: Optional[str] = None,
     subject: Optional[str] = None,
     container: Optional[str] = None,
+    choose: bool = False,
     *,
     dry_run: bool = False,
     tool_path: Optional[str] = None,
 ) -> Path:
     src = _ensure_input_file(input_path)
     dst = _resolve_output_path(".p7m", output_path, src)
-    selector_args = _build_selector_args(thumbprint, subject, container)
+    selector_args = _build_selector_args(
+        thumbprint,
+        subject,
+        container,
+        choose_certificate=choose,
+    )
     cmd = _prepare_command(
         CRYPTCP_FLAGS["sign_attached"],
         src,
