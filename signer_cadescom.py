@@ -80,6 +80,20 @@ def _open_store(location: int):
     return store
 
 
+def _safe_is_valid(cert) -> bool:
+    """Проверяет валидность сертификата без падения на ошибках COM."""
+
+    try:
+        validation = cert.IsValid()
+        return bool(getattr(validation, "Result", False))
+    except Exception:  # pragma: no cover - зависит от данных сертификатов
+        thumbprint = str(getattr(cert, "Thumbprint", ""))
+        logger.warning(
+            "Не удалось проверить валидность сертификата %s", thumbprint, exc_info=True
+        )
+        return True
+
+
 def _collect_store(location: int) -> List[CertificateSummary]:
     certificates: List[CertificateSummary] = []
     try:
@@ -97,8 +111,7 @@ def _collect_store(location: int) -> List[CertificateSummary]:
             try:
                 thumbprint = cert.Thumbprint
                 has_private_key = bool(getattr(cert, "HasPrivateKey", False))
-                validation = cert.IsValid()
-                is_valid = bool(getattr(validation, "Result", False))
+                is_valid = _safe_is_valid(cert)
                 certificates.append(
                     CertificateSummary(
                         subject=str(cert.SubjectName),
