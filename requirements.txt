@@ -4,3 +4,4 @@ asn1crypto
 cryptography
 pkcs11
 gostcrypto
+pywin32
