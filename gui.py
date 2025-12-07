@@ -42,6 +42,10 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QTextBrowser,
     QFrame,
+    QTabWidget,
+    QSpinBox,
+    QSpacerItem,
+    QSizePolicy,
 )
 
 from pdf_utils import (
@@ -52,7 +56,7 @@ from pdf_utils import (
     save_header_config,
 )
 from signature_utils import get_certificate_info, CertificateInfo
-from signing_utils import sign_pdf
+from signing_utils import sign_pdf, sign_pdf_with_pkcs11
 from paths import get_resource_path
 
 logger = logging.getLogger(__name__)
@@ -439,9 +443,33 @@ class SignDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Подписать PDF ЭЦП")
         self.pdf_path = pdf_path
+        self._result = None
 
-        form = QFormLayout()
-        form.addRow("Файл:", QLabel(os.path.basename(pdf_path)))
+        tabs = QTabWidget()
+        tabs.addTab(self._build_files_tab(), "Файлы сертификата и ключа")
+        tabs.addTab(self._build_pkcs11_tab(), "Токен PKCS#11")
+        self.tabs = tabs
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+
+        ok_btn = buttons.button(QDialogButtonBox.Ok)
+        cancel_btn = buttons.button(QDialogButtonBox.Cancel)
+        if ok_btn:
+            ok_btn.setText("Подписать")
+        if cancel_btn:
+            cancel_btn.setText("Отмена")
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(tabs)
+        layout.addWidget(buttons)
+
+    # --- вкладка файла ---
+    def _build_files_tab(self):
+        widget = QWidget()
+        form = QFormLayout(widget)
+        form.addRow("Файл:", QLabel(os.path.basename(self.pdf_path)))
 
         self.cert_edit = QLineEdit()
         self.cert_btn = QPushButton("…")
@@ -467,20 +495,51 @@ class SignDialog(QDialog):
         self.password_edit.setEchoMode(QLineEdit.Password)
         form.addRow("Пароль к ключу (если есть):", self.password_edit)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self._validate_and_accept)
-        buttons.rejected.connect(self.reject)
+        form.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        return widget
 
-        ok_btn = buttons.button(QDialogButtonBox.Ok)
-        cancel_btn = buttons.button(QDialogButtonBox.Cancel)
-        if ok_btn:
-            ok_btn.setText("Подписать")
-        if cancel_btn:
-            cancel_btn.setText("Отмена")
+    # --- вкладка токена ---
+    def _build_pkcs11_tab(self):
+        widget = QWidget()
+        form = QFormLayout(widget)
+        form.addRow("Файл:", QLabel(os.path.basename(self.pdf_path)))
 
-        layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
+        self.pkcs11_lib_edit = QLineEdit()
+        self.pkcs11_lib_btn = QPushButton("…")
+        self.pkcs11_lib_btn.setFixedWidth(32)
+        self.pkcs11_lib_btn.clicked.connect(self._browse_pkcs11)
+        lib_layout = QHBoxLayout()
+        lib_layout.addWidget(self.pkcs11_lib_edit, 1)
+        lib_layout.addWidget(self.pkcs11_lib_btn)
+        form.addRow("Библиотека PKCS#11:", lib_layout)
+
+        self.token_label_edit = QLineEdit()
+        form.addRow("Метка токена (опц.):", self.token_label_edit)
+
+        self.slot_spin = QSpinBox()
+        self.slot_spin.setRange(-1, 1000)
+        self.slot_spin.setValue(-1)
+        self.slot_spin.setSpecialValueText("Авто")
+        form.addRow("Слот (опц.):", self.slot_spin)
+
+        self.key_label_edit = QLineEdit()
+        form.addRow("Метка ключа (опц.):", self.key_label_edit)
+
+        self.pin_edit = QLineEdit()
+        self.pin_edit.setEchoMode(QLineEdit.Password)
+        form.addRow("PIN токена:", self.pin_edit)
+
+        self.token_cert_edit = QLineEdit()
+        self.token_cert_btn = QPushButton("…")
+        self.token_cert_btn.setFixedWidth(32)
+        self.token_cert_btn.clicked.connect(self._browse_token_cert)
+        token_cert_layout = QHBoxLayout()
+        token_cert_layout.addWidget(self.token_cert_edit, 1)
+        token_cert_layout.addWidget(self.token_cert_btn)
+        form.addRow("Сертификат (если не на токене):", token_cert_layout)
+
+        form.addItem(QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        return widget
 
     def _browse_cert(self):
         start_dir = os.path.dirname(self.pdf_path) if os.path.isfile(self.pdf_path) else ""
@@ -504,23 +563,69 @@ class SignDialog(QDialog):
         if path:
             self.key_edit.setText(path)
 
+    def _browse_pkcs11(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Укажите библиотеку PKCS#11",
+            "",
+            "*.dll *.so *.dylib ;;Все файлы (*.*)",
+        )
+        if path:
+            self.pkcs11_lib_edit.setText(path)
+
+    def _browse_token_cert(self):
+        start_dir = os.path.dirname(self.pdf_path) if os.path.isfile(self.pdf_path) else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите файл сертификата",
+            start_dir,
+            "Сертификаты (*.cer *.pem *.crt);;Все файлы (*.*)",
+        )
+        if path:
+            self.token_cert_edit.setText(path)
+
     def _validate_and_accept(self):
-        cert_path = self.cert_edit.text().strip()
-        key_path = self.key_edit.text().strip()
-        if not cert_path or not os.path.exists(cert_path):
-            QMessageBox.warning(self, "Нет сертификата", "Укажите путь к файлу сертификата.")
-            return
-        if not key_path or not os.path.exists(key_path):
-            QMessageBox.warning(self, "Нет ключа", "Укажите путь к файлу закрытого ключа.")
-            return
+        if self.tabs.currentIndex() == 0:
+            cert_path = self.cert_edit.text().strip()
+            key_path = self.key_edit.text().strip()
+            if not cert_path or not os.path.exists(cert_path):
+                QMessageBox.warning(self, "Нет сертификата", "Укажите путь к файлу сертификата.")
+                return
+            if not key_path or not os.path.exists(key_path):
+                QMessageBox.warning(self, "Нет ключа", "Укажите путь к файлу закрытого ключа.")
+                return
+            self._result = {
+                "mode": "files",
+                "cert_path": cert_path,
+                "key_path": key_path,
+                "password": self.password_edit.text(),
+            }
+        else:
+            pkcs11_path = self.pkcs11_lib_edit.text().strip()
+            pin = self.pin_edit.text()
+            slot = self.slot_spin.value()
+            slot_value = None if slot < 0 else slot
+            if not pkcs11_path or not os.path.exists(pkcs11_path):
+                QMessageBox.warning(
+                    self, "Библиотека PKCS#11", "Укажите путь к библиотеке PKCS#11."
+                )
+                return
+            if not pin:
+                QMessageBox.warning(self, "PIN", "Введите PIN токена для подписи.")
+                return
+            self._result = {
+                "mode": "pkcs11",
+                "pkcs11_path": pkcs11_path,
+                "token_label": self.token_label_edit.text().strip() or None,
+                "slot": slot_value,
+                "key_label": self.key_label_edit.text().strip() or None,
+                "pin": pin,
+                "cert_path": self.token_cert_edit.text().strip() or None,
+            }
         super().accept()
 
-    def get_values(self):
-        return (
-            self.cert_edit.text().strip(),
-            self.key_edit.text().strip(),
-            self.password_edit.text(),
-        )
+    def get_result(self):
+        return self._result
 
 
 class MainWindow(QMainWindow):
@@ -828,9 +933,27 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.Accepted:
             return
 
-        cert_path, key_path, password = dlg.get_values()
+        result = dlg.get_result()
+        if not result:
+            return
         try:
-            signature_path = sign_pdf(session.pdf_path, cert_path, key_path, password)
+            if result["mode"] == "files":
+                signature_path = sign_pdf(
+                    session.pdf_path,
+                    result["cert_path"],
+                    result["key_path"],
+                    result["password"],
+                )
+            else:
+                signature_path = sign_pdf_with_pkcs11(
+                    session.pdf_path,
+                    result["pkcs11_path"],
+                    result["pin"],
+                    token_label=result.get("token_label"),
+                    slot=result.get("slot"),
+                    key_label=result.get("key_label"),
+                    cert_path=result.get("cert_path"),
+                )
         except Exception as e:
             logger.exception("Ошибка создания подписи")
             QMessageBox.critical(
