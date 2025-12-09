@@ -94,6 +94,12 @@ def _dispatch(prog_id: str):
             )
             obj = win32com.client.Dispatch(prog_id)
             if not hasattr(obj, "Open"):
+                logger.warning(
+                    "Dispatch('%s') также не дал метод Open, пробуем CAPICOM.Store", prog_id
+                )
+                obj = win32com.client.Dispatch("CAPICOM.Store")
+                if hasattr(obj, "Open"):
+                    return obj
                 raise SignerCadescomError(
                     "CAdESCOM.Store недоступен: COM-объект не имеет метода Open"
                 )
