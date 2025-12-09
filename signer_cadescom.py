@@ -93,6 +93,10 @@ def _dispatch(prog_id: str):
                 "EnsureDispatch вернул %s без метода Open, пробуем Dispatch", obj
             )
             obj = win32com.client.Dispatch(prog_id)
+            if not hasattr(obj, "Open"):
+                raise SignerCadescomError(
+                    "CAdESCOM.Store недоступен: COM-объект не имеет метода Open"
+                )
         return obj
     except Exception as exc:  # pragma: no cover - зависит от окружения Windows
         message = str(exc)
