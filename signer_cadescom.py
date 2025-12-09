@@ -13,39 +13,19 @@ except Exception:  # pragma: no cover - win32com может отсутствов
     win32com = None
     pywintypes = None
 
-if win32com is not None:  # pragma: no cover - зависит от среды Windows
-    try:
-        ensure_dispatch = win32com.client.gencache.EnsureDispatch
-        com_constants = win32com.client.constants
-    except Exception:
-        ensure_dispatch = win32com.client.Dispatch
-        com_constants = None
-else:
-    ensure_dispatch = None
-    com_constants = None
-
 logger = logging.getLogger(__name__)
 
 
-def _const(name: str, fallback):  # pragma: no cover - простая функция
-    if com_constants is None:
-        return fallback
-    try:
-        return getattr(com_constants, name)
-    except Exception:
-        return fallback
-
-
-CAPICOM_LOCAL_MACHINE_STORE = _const("CAPICOM_LOCAL_MACHINE_STORE", 1)
-CAPICOM_CURRENT_USER_STORE = _const("CAPICOM_CURRENT_USER_STORE", 2)
-CAPICOM_MY_STORE = _const("CAPICOM_MY_STORE", "My")
-CAPICOM_STORE_OPEN_READ_ONLY = _const("CAPICOM_STORE_OPEN_READ_ONLY", 0)
-CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED = _const("CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED", 2)
-CAPICOM_CERTIFICATE_FIND_SHA1_HASH = _const("CAPICOM_CERTIFICATE_FIND_SHA1_HASH", 0)
-CADESCOM_CADES_BES = _const("CADESCOM_CADES_BES", 1)
-CADESCOM_ENCODE_BASE64 = _const("CADESCOM_ENCODE_BASE64", 0)
-CADESCOM_ENCODE_BINARY = _const("CADESCOM_ENCODE_BINARY", 1)
-CADESCOM_BASE64_TO_BINARY = _const("CADESCOM_BASE64_TO_BINARY", 1)
+CAPICOM_LOCAL_MACHINE_STORE = 1
+CAPICOM_CURRENT_USER_STORE = 2
+CAPICOM_MY_STORE = "My"
+CAPICOM_STORE_OPEN_READ_ONLY = 0
+CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED = 2
+CAPICOM_CERTIFICATE_FIND_SHA1_HASH = 0
+CADESCOM_CADES_BES = 1
+CADESCOM_ENCODE_BASE64 = 0
+CADESCOM_ENCODE_BINARY = 1
+CADESCOM_BASE64_TO_BINARY = 1
 
 
 class SignerCadescomError(RuntimeError):
@@ -85,24 +65,17 @@ def _ensure_com_available():
 
 def _dispatch(prog_id: str):
     try:
-        obj = ensure_dispatch(prog_id)
-        # Иногда EnsureDispatch возвращает IEventSource без нужных методов
-        # (например, вместо CAdESCOM.Store), тогда пробуем обычный Dispatch.
+        obj = win32com.client.Dispatch(prog_id)
         if prog_id == "CAdESCOM.Store" and not hasattr(obj, "Open"):
             logger.warning(
-                "EnsureDispatch вернул %s без метода Open, пробуем Dispatch", obj
+                "Dispatch('%s') вернул объект без метода Open, пробуем CAPICOM.Store", prog_id
             )
-            obj = win32com.client.Dispatch(prog_id)
-            if not hasattr(obj, "Open"):
-                logger.warning(
-                    "Dispatch('%s') также не дал метод Open, пробуем CAPICOM.Store", prog_id
-                )
-                obj = win32com.client.Dispatch("CAPICOM.Store")
-                if hasattr(obj, "Open"):
-                    return obj
-                raise SignerCadescomError(
-                    "CAdESCOM.Store недоступен: COM-объект не имеет метода Open"
-                )
+            obj = win32com.client.Dispatch("CAPICOM.Store")
+            if hasattr(obj, "Open"):
+                return obj
+            raise SignerCadescomError(
+                "CAdESCOM.Store недоступен: COM-объект не имеет метода Open"
+            )
         return obj
     except Exception as exc:  # pragma: no cover - зависит от окружения Windows
         message = str(exc)
@@ -119,7 +92,7 @@ def _open_store(location: int, open_mode: int):
     return store
 
 
-def _safe_is_valid(cert) -> bool:
+def _safe_is_valid(cert) -> Optional[bool]:
     """Проверяет валидность сертификата без падения на ошибках COM."""
 
     try:
@@ -130,7 +103,7 @@ def _safe_is_valid(cert) -> bool:
         logger.warning(
             "Не удалось проверить валидность сертификата %s", thumbprint, exc_info=True
         )
-        return False
+        return None
 
 
 def _log_com_error(exc, message: str):
