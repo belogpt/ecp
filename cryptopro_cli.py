@@ -61,8 +61,10 @@ def find_cryptopro_tools() -> str:
             logger.debug("cryptcp найден по умолчанию: %s", candidate)
             return candidate
 
+    checked_locations = ", ".join(candidates) if candidates else "(проверить PATH)"
     raise CryptoProNotFoundError(
-        "Утилита cryptcp не найдена. Установите CryptoPro CSP и убедитесь, что cryptcp доступен."
+        "Утилита cryptcp не найдена. Установите CryptoPro CSP (включая утилиту командной строки) и убедитесь, "
+        f"что cryptcp доступен. Проверенные пути: {checked_locations}"
     )
 
 
